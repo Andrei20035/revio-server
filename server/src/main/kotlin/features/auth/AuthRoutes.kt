@@ -3,6 +3,7 @@ package com.revio.server.features.auth
 import com.revio.server.core.error.AuthBadRequestException
 import com.revio.server.core.error.AuthConflictException
 import com.revio.server.core.error.AuthErrorCode
+import com.revio.server.core.error.AuthForbiddenException
 import com.revio.server.core.error.AuthNotFoundException
 import com.revio.server.core.error.AuthUnauthorizedException
 import com.revio.server.features.account_deletion.IAccountDeletionService
@@ -26,6 +27,7 @@ import com.revio.server.features.auth.session.RevokeReason
 import com.revio.server.features.auth.session.SessionRevokedException
 import com.revio.server.features.auth.session.SessionScope
 import com.revio.server.features.leaderboard.ILeaderboardService
+import com.revio.server.features.user.BanState
 import com.revio.server.features.user.IUserDAO
 import com.revio.server.features.user.IUserService
 import com.revio.server.features.user.UserRole
@@ -200,6 +202,12 @@ fun Route.authRoutes() {
                 throw e
             }
             if (result != null) {
+                if (result.userId != null) {
+                    val banState = userDao.findBanState(result.userId)
+                    if (banState?.isActive() == true) {
+                        throw AuthForbiddenException(AuthErrorCode.ACCOUNT_SUSPENDED, banSuspensionMessage(banState))
+                    }
+                }
                 val scope = if (result.userId == null) SessionScope.ONBOARDING else SessionScope.FULL
                 val (session, refreshToken) = sessionService.createSession(
                     credentialId = result.id,
@@ -274,6 +282,13 @@ fun Route.authRoutes() {
                     AuthErrorCode.REFRESH_TOKEN_INVALID,
                     "Refresh token is invalid"
                 )
+            }
+
+            if (session.userId != null) {
+                val banState = userDao.findBanState(session.userId)
+                if (banState?.isActive() == true) {
+                    throw AuthForbiddenException(AuthErrorCode.ACCOUNT_SUSPENDED, banSuspensionMessage(banState))
+                }
             }
 
             val credential = authService.getCredentialsById(session.credentialId)
@@ -490,6 +505,13 @@ fun Route.authRoutes() {
 /** Re-reads the current DB role for [userId] (null when no user profile exists yet, e.g. mid-onboarding). */
 private suspend fun IUserDAO.isAdmin(userId: UUID?): Boolean =
     userId != null && getUserById(userId)?.role == UserRole.ADMIN
+
+private fun banSuspensionMessage(banState: BanState): String {
+    val durationClause = if (banState.permanent) "permanently" else "until ${banState.bannedUntil}"
+    val reasonClause = banState.reason?.takeIf { it.isNotBlank() }?.let { " Reason: $it." } ?: ""
+    return "Your account has been suspended $durationClause.$reasonClause " +
+        "Contact threvioapp@gmail.com if you believe this is a mistake."
+}
 
 private fun isValidEmail(email: String): Boolean {
     val emailRegex = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")

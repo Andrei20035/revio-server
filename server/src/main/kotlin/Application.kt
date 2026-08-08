@@ -24,6 +24,8 @@ import features.like.likeModule
 import features.report.reportModule
 import com.revio.server.features.leaderboard.ILeaderboardSnapshotDAO
 import com.revio.server.features.leaderboard.leaderboardModule
+import com.revio.server.features.moderation.moderationModule
+import com.revio.server.features.notification.notificationModule
 import com.revio.server.features.post.postModule
 import com.revio.server.features.scoring.scoringModule
 import com.revio.server.features.user.userModule
@@ -63,7 +65,9 @@ fun Application.module() {
             accountDeletionModule,
             feedbackModule,
             carFamilyModule,
-            challengeModule
+            challengeModule,
+            notificationModule,
+            moderationModule
         )
     }
 

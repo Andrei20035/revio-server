@@ -3,6 +3,9 @@ package com.revio.server.features.post
 import com.revio.server.core.storage.IStorageService
 import com.revio.server.features.car_model.ICarModelDAO
 import com.revio.server.features.challenge.IChallengeProgressService
+import com.revio.server.features.moderation.IOrphanedStorageObjectDAO
+import com.revio.server.features.moderation.ModerationReason
+import com.revio.server.features.moderation.OrphanedStorageObjectDAO
 import com.revio.server.features.post.dto.CreatePostDTO
 import com.revio.server.features.post.dto.FeedCursorDTO
 import com.revio.server.features.post.dto.FeedResponseDTO
@@ -34,8 +37,26 @@ interface IPostService {
 
     /** Moderator takedown (e.g. an upheld report). Same removal mechanics as [deletePostAsAuthor], no ownership check. */
     suspend fun removePostAsModerator(postId: UUID, moderatorId: UUID)
+
+    /**
+     * Admin-initiated removal with an explicit, card-selected reason: records a moderation
+     * violation and an audit log entry atomically with the removal, and — unless [notifyUser] is
+     * false — a "post removed" notification. Bulk removal passes `notifyUser = false` for every
+     * post and sends one aggregated notification per affected owner afterwards instead.
+     * @return the created violation id and the post's owner id (so bulk removal can aggregate).
+     */
+    suspend fun removePostAsModerator(
+        postId: UUID,
+        moderatorId: UUID,
+        reason: ModerationReason,
+        reasonDetails: String?,
+        notifyUser: Boolean = true,
+    ): ModeratedRemovalResult
+
     suspend fun updatePostAsAuthor(postId: UUID, authorId: UUID, request: UpdatePostRequest): PostDTO
 }
+
+data class ModeratedRemovalResult(val violationId: UUID, val ownerId: UUID)
 
 /** Who triggered a post removal — carried only for the structured log line at the end of [PostServiceImpl.removePost]. */
 sealed class PostRemovalActor {
@@ -53,6 +74,9 @@ class PostServiceImpl(
     private val scoringDao: IScoringDao,
     private val challengeProgressService: IChallengeProgressService,
     private val postRemovalDao: IPostRemovalDAO,
+    // Defaulted for the same reason as PostRemovalDAO's trailing moderation deps: pre-existing
+    // callers that construct PostServiceImpl with the original 9 args keep compiling unchanged.
+    private val orphanedStorageDao: IOrphanedStorageObjectDAO = OrphanedStorageObjectDAO(),
 ) : IPostService {
     companion object {
         private val logger = LoggerFactory.getLogger(PostServiceImpl::class.java)
@@ -213,27 +237,55 @@ class PostServiceImpl(
         removePost(post, PostRemovalActor.Moderator(moderatorId))
     }
 
+    override suspend fun removePostAsModerator(
+        postId: UUID,
+        moderatorId: UUID,
+        reason: ModerationReason,
+        reasonDetails: String?,
+        notifyUser: Boolean,
+    ): ModeratedRemovalResult {
+        val post = postDao.findById(postId) ?: throw PostNotFoundException(postId)
+        val moderation = ModerationRemoval(
+            adminId = moderatorId,
+            reason = reason,
+            reasonDetails = reasonDetails,
+            notifyUser = notifyUser,
+        )
+        val violationId = removePost(post, PostRemovalActor.Moderator(moderatorId), moderation)
+            ?: error("Moderated removal of post $postId did not produce a violation id")
+        return ModeratedRemovalResult(violationId = violationId, ownerId = post.userId)
+    }
+
     /**
-     * Shared removal mechanics for both public entry points above — only the ownership/role
-     * check differs between them, done by the caller before this is reached.
+     * Shared removal mechanics for every public entry point above — only the ownership/role check
+     * and [moderation] context differ between them, both decided by the caller before this is
+     * reached. @return the violation id created for a moderated removal, or null for a plain one.
      */
-    private suspend fun removePost(post: Post, actor: PostRemovalActor) {
-        // Challenge reconciliation, points reversal and the delete itself all happen in ONE
-        // transaction (see IPostRemovalDAO.removePostAtomically). Deliberately NOT best-effort:
-        // if reconciliation fails, the exception propagates, the transaction rolls back and the
-        // post is still there to retry. Swallowing it would let the delete commit alone, and
+    private suspend fun removePost(post: Post, actor: PostRemovalActor, moderation: ModerationRemoval? = null): UUID? {
+        // Challenge reconciliation, points reversal, the delete itself, and (for a moderated
+        // removal) the violation/audit/notification rows all happen in ONE transaction (see
+        // IPostRemovalDAO.removePostAtomically). Deliberately NOT best-effort: if reconciliation
+        // fails, the exception propagates, the transaction rolls back and the post is still there
+        // to retry. Swallowing it would let the delete commit alone, and
         // challenge_contributions.post_id being ON DELETE CASCADE would then erase the
         // contributions without revoking the reward they earned — an inflated spot_score that
         // nothing recomputes and no reconciliation job can detect. Cascade also removes the
         // post's likes, comments and reports.
-        postRemovalDao.removePostAtomically(post.id, challengeProgressService.contributionRevokePolicy())
+        val outcome = postRemovalDao.removePostAtomically(post.id, challengeProgressService.contributionRevokePolicy(), moderation)
 
         // Only once the transaction has committed is the image safe to drop. This one stays
-        // best-effort: an orphaned object costs storage, it can't corrupt scores.
+        // best-effort: an orphaned object costs storage, it can't corrupt scores. A failure is
+        // queued for retry rather than silently dropped, so a moderated removal is never undone
+        // just because a file couldn't be deleted.
         runCatching { storageService.deleteImage(post.imageKey) }
-            .onFailure { logger.warn("Post {} removed but image cleanup failed", post.id, it) }
+            .onFailure { e ->
+                logger.warn("Post {} removed but image cleanup failed", post.id, e)
+                runCatching { orphanedStorageDao.recordFailure(post.imageKey, e.message) }
+                    .onFailure { logger.error("Failed to queue orphaned storage object for post {}", post.id, it) }
+            }
 
         logger.info("Post {} removed by {}", post.id, actor)
+        return outcome.violationId
     }
 
     override suspend fun updatePostAsAuthor(postId: UUID, authorId: UUID, request: UpdatePostRequest): PostDTO {

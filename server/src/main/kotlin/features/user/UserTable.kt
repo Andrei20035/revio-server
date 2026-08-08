@@ -30,4 +30,9 @@ object UserTable : UUIDTable("users") {
     val birthDateChangedAt = timestamp("birth_date_changed_at").nullable()
     val usernameChangedAt = timestamp("username_changed_at").nullable()
     val phoneNumberChangedAt = timestamp("phone_number_changed_at").nullable()
+    val bannedUntil = timestamp("banned_until").nullable()
+    val banPermanent = bool("ban_permanent").default(false)
+    val banReason = text("ban_reason").nullable()
+    val bannedAt = timestamp("banned_at").nullable()
+    val bannedBy = uuid("banned_by").references(UserTable.id, onDelete = ReferenceOption.SET_NULL).nullable()
 }

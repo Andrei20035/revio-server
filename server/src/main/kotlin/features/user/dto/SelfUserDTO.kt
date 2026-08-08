@@ -1,6 +1,7 @@
 package com.revio.server.features.user.dto
 
 import com.revio.server.features.user.User
+import com.revio.server.features.user.UserRole
 import com.revio.server.features.user.profileChangeCooldown
 import com.revio.server.core.serialization.InstantSerializer
 import com.revio.server.core.serialization.LocalDateSerializer
@@ -23,6 +24,7 @@ data class SelfUserDTO(
     val birthDate: LocalDate,
     val spotScore: Int = 0,
     val postCount: Int = 0,
+    val isAdmin: Boolean = false,
     val isEarlySpotter: Boolean = false,
     val earlySpotterNumber: Int? = null,
     @Serializable(with = InstantSerializer::class)
@@ -56,6 +58,7 @@ fun User.toSelfDTO(profilePictureUrl: String? = profilePicturePath, postCount: I
         birthDate = this.birthDate,
         spotScore = this.spotScore,
         postCount = postCount,
+        isAdmin = this.role == UserRole.ADMIN,
         isEarlySpotter = this.isEarlySpotter,
         earlySpotterNumber = this.earlySpotterNumber,
         createdAt = this.createdAt,

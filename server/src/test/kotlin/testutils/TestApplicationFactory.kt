@@ -54,6 +54,24 @@ import com.revio.server.features.leaderboard.LeaderboardService
 import com.revio.server.features.leaderboard.LeaderboardSnapshotDAO
 import com.revio.server.features.leaderboard.adminLeaderboardRoutes
 import com.revio.server.features.leaderboard.leaderboardRoutes
+import com.revio.server.features.moderation.AdminAuditLogDAO
+import com.revio.server.features.moderation.AdminUserQueryDAO
+import com.revio.server.features.moderation.BanDAO
+import com.revio.server.features.moderation.IAdminAuditLogDAO
+import com.revio.server.features.moderation.IAdminUserQueryDAO
+import com.revio.server.features.moderation.IBanDAO
+import com.revio.server.features.moderation.IModerationService
+import com.revio.server.features.moderation.IModerationViolationDAO
+import com.revio.server.features.moderation.IOrphanedStorageObjectDAO
+import com.revio.server.features.moderation.ModerationService
+import com.revio.server.features.moderation.ModerationViolationDAO
+import com.revio.server.features.moderation.OrphanedStorageObjectDAO
+import com.revio.server.features.moderation.moderationAdminRoutes
+import com.revio.server.features.notification.INotificationDAO
+import com.revio.server.features.notification.INotificationService
+import com.revio.server.features.notification.NotificationDAO
+import com.revio.server.features.notification.NotificationService
+import com.revio.server.features.notification.notificationRoutes
 import com.revio.server.features.post.IPostDAO
 import com.revio.server.features.post.IPostService
 import com.revio.server.features.post.PostDAO
@@ -364,6 +382,40 @@ fun Application.testFeedbackModule() {
     }
 }
 
+/**
+ * Modul Ktor pentru testele rutelor /notifications.
+ * Folosește același config JWT ca testele de auth.
+ */
+fun Application.testNotificationModule() {
+    val koinTestModule = module {
+        single<INotificationDAO> { NotificationDAO() }
+        single<IAuthSessionDAO> { AuthSessionDAO() }
+        single { RefreshTokenGenerator() }
+        single<ISessionService> { SessionService(get(), get()) }
+        single<INotificationService> { NotificationService(get()) }
+        single {
+            JwtService(
+                jwtSecret = TestEnv.JWT_SECRET,
+                jwtIssuer = TestEnv.JWT_ISSUER,
+                jwtAudience = TestEnv.JWT_AUDIENCE
+            )
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+    configureSecurity(getKoin().get())
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            notificationRoutes()
+        }
+    }
+}
+
 fun Application.testPostModule(storage: IStorageService? = null) {
     val uploadsDir = Files.createTempDirectory("posts-route-test-uploads")
     val koinTestModule = module {
@@ -404,6 +456,63 @@ fun Application.testPostModule(storage: IStorageService? = null) {
     routing {
         route("/api") {
             postRoutes()
+        }
+    }
+}
+
+/**
+ * Ktor module for the admin post-moderation routes (/api/admin/posts, /api/admin/storage).
+ * Wires the same real post/challenge/scoring stack as [testPostModule] plus the moderation and
+ * notification DAOs, so a removal exercises the full atomic transaction end to end.
+ */
+fun Application.testModerationModule() {
+    val uploadsDir = Files.createTempDirectory("moderation-route-test-uploads")
+    val koinTestModule = module {
+        single<ICarModelDAO> { CarModelDAO() }
+        single<IPostDAO> { PostDAO() }
+        single<ILikeDAO> { LikeDAO() }
+        single<ICommentDAO> { CommentDAO() }
+        single<IUserDAO> { UserDao() }
+        single<IAuthSessionDAO> { AuthSessionDAO() }
+        single { RefreshTokenGenerator() }
+        single<ISessionService> { SessionService(get(), get()) }
+        single<IStorageService> { LocalImageStorageService(uploadsDir, "http://localhost:8080") }
+        single<IScoringDao> { ScoringDaoImpl() }
+        single<IScoringService> { ScoringServiceImpl(get(), get(), get()) }
+        single<IUserService> { UserService(get(), get()) }
+        single<ICarFamilyDAO> { CarFamilyDAO() }
+        single<IChallengeDAO> { ChallengeDAO() }
+        single<IChallengeProgressDAO> { ChallengeProgressDAO() }
+        single<IChallengeProgressService> { ChallengeProgressService(get(), get()) }
+        single<INotificationDAO> { NotificationDAO() }
+        single<INotificationService> { NotificationService(get()) }
+        single<IAdminAuditLogDAO> { AdminAuditLogDAO() }
+        single<IModerationViolationDAO> { ModerationViolationDAO(get()) }
+        single<IOrphanedStorageObjectDAO> { OrphanedStorageObjectDAO() }
+        single<IAdminUserQueryDAO> { AdminUserQueryDAO() }
+        single<IBanDAO> { BanDAO(get(), get()) }
+        single<IPostRemovalDAO> { PostRemovalDAO(get(), get(), get(), get(), get()) }
+        single<IPostService> { PostServiceImpl(get(), get(), get(), get(), get(), get(), get(), get(), get(), get()) }
+        single<IModerationService> { ModerationService(get(), get(), get(), get(), get(), get(), get(), get(), get()) }
+        single {
+            JwtService(
+                jwtSecret = TestEnv.JWT_SECRET,
+                jwtIssuer = TestEnv.JWT_ISSUER,
+                jwtAudience = TestEnv.JWT_AUDIENCE
+            )
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+    configureSecurity(getKoin().get())
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            moderationAdminRoutes()
         }
     }
 }

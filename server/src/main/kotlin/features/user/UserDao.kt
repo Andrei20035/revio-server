@@ -13,9 +13,22 @@ import java.time.Instant
 import java.time.LocalDate
 import java.util.*
 
+/** Ban snapshot for a user; [isActive] is the single source of truth for "is this ban currently in effect". */
+data class BanState(
+    val permanent: Boolean,
+    val bannedUntil: Instant?,
+    val reason: String?,
+) {
+    fun isActive(now: Instant = Instant.now()): Boolean =
+        permanent || (bannedUntil != null && bannedUntil.isAfter(now))
+}
+
 interface IUserDAO {
     suspend fun createUser(user: User): UUID
     suspend fun getUserById(userId: UUID): User?
+
+    /** Current ban fields for [userId]. Null if the user doesn't exist. */
+    suspend fun findBanState(userId: UUID): BanState?
     suspend fun getUserByAuthCredentialId(authCredentialId: UUID): User?
     suspend fun usernameExistsIgnoreCase(username: String): Boolean
     suspend fun usernameExistsIgnoreSelf(username: String, excludeUserId: UUID): Boolean
@@ -84,6 +97,20 @@ class UserDao : IUserDAO {
             .where { UserTable.id eq userId }
             .mapNotNull { it.toUser() }
             .singleOrNull()
+    }
+
+    override suspend fun findBanState(userId: UUID): BanState? = transaction {
+        UserTable
+            .select(UserTable.banPermanent, UserTable.bannedUntil, UserTable.banReason)
+            .where { UserTable.id eq userId }
+            .singleOrNull()
+            ?.let {
+                BanState(
+                    permanent = it[UserTable.banPermanent],
+                    bannedUntil = it[UserTable.bannedUntil],
+                    reason = it[UserTable.banReason],
+                )
+            }
     }
 
     override suspend fun getUserByAuthCredentialId(authCredentialId: UUID): User? = transaction {
@@ -231,6 +258,11 @@ class UserDao : IUserDAO {
         birthDateChangedAt = this[UserTable.birthDateChangedAt],
         usernameChangedAt = this[UserTable.usernameChangedAt],
         phoneNumberChangedAt = this[UserTable.phoneNumberChangedAt],
+        bannedUntil = this[UserTable.bannedUntil],
+        banPermanent = this[UserTable.banPermanent],
+        banReason = this[UserTable.banReason],
+        bannedAt = this[UserTable.bannedAt],
+        bannedBy = this[UserTable.bannedBy],
     )
 }
 

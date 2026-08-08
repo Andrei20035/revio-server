@@ -12,6 +12,8 @@ import com.revio.server.features.friend.friendRoutes
 import com.revio.server.features.friend_request.friendRequestRoutes
 import com.revio.server.features.leaderboard.adminLeaderboardRoutes
 import com.revio.server.features.leaderboard.leaderboardRoutes
+import com.revio.server.features.moderation.moderationAdminRoutes
+import com.revio.server.features.notification.notificationRoutes
 import features.like.likeRoutes
 import features.report.reportAdminRoutes
 import features.report.reportRoutes
@@ -47,6 +49,8 @@ fun Application.configureRouting() {
             adminLeaderboardRoutes()
             leaderboardRoutes()
             likeRoutes()
+            moderationAdminRoutes()
+            notificationRoutes()
             reportAdminRoutes()
             reportRoutes()
             postRoutes()

@@ -28,4 +28,9 @@ data class User(
     val birthDateChangedAt: Instant? = null,
     val usernameChangedAt: Instant? = null,
     val phoneNumberChangedAt: Instant? = null,
+    val bannedUntil: Instant? = null,
+    val banPermanent: Boolean = false,
+    val banReason: String? = null,
+    val bannedAt: Instant? = null,
+    val bannedBy: UUID? = null,
 )

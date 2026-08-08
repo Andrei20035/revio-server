@@ -10,6 +10,11 @@ import com.revio.server.features.challenge.ChallengeRewardLedgerTable
 import com.revio.server.features.challenge.ChallengeStatus
 import com.revio.server.features.challenge.IChallengeProgressDAO
 import com.revio.server.features.challenge.RewardState
+import com.revio.server.features.moderation.AdminAuditLogTable
+import com.revio.server.features.moderation.ModerationReason
+import com.revio.server.features.moderation.ModerationViolationTable
+import com.revio.server.features.notification.NotificationTable
+import com.revio.server.features.post.ModerationRemoval
 import com.revio.server.features.post.PostRemovalDAO
 import com.revio.server.features.post.PostSource
 import com.revio.server.features.post.PostTable
@@ -181,6 +186,24 @@ class PostRemovalDaoAtomicityTest {
             .toInt()
     }
 
+    private fun violationCount(postId: UUID): Long = transaction {
+        ModerationViolationTable.select(ModerationViolationTable.id)
+            .where { ModerationViolationTable.postId eq postId }
+            .count()
+    }
+
+    private fun notificationCount(userId: UUID): Long = transaction {
+        NotificationTable.select(NotificationTable.id)
+            .where { NotificationTable.userId eq userId }
+            .count()
+    }
+
+    private fun auditLogCount(targetId: UUID): Long = transaction {
+        AdminAuditLogTable.select(AdminAuditLogTable.id)
+            .where { AdminAuditLogTable.targetId eq targetId }
+            .count()
+    }
+
     // ---------- 1. successful reconciliation commits everything ----------
 
     @Test
@@ -278,5 +301,69 @@ class PostRemovalDaoAtomicityTest {
         assertEquals(requiredPosts, contributionCount(fixture.challengeId, fixture.userId))
         assertEquals(RewardState.GRANTED, rewardState(fixture.challengeId, fixture.userId))
         assertEquals(normalPointsPerPost * 2 + rewardPoints, spotScore(fixture.userId))
+    }
+
+    // ---------- 5. a moderated removal's rollback must not leave an orphaned violation/notification ----------
+
+    /**
+     * When [ModerationRemoval] is passed, the violation row, the audit log entry and the "post
+     * removed" notification are written in the SAME transaction as the challenge reconciliation
+     * and the post delete (see PostRemovalDAO's KDoc). A violation for a post that turned out not
+     * to be removed — because the transaction rolled back — would be a phantom accusation sitting
+     * in the DB with no post to back it up; a notification for it would tell the user a post was
+     * removed when it wasn't. This pins that a failed reconciliation rolls all of it back together.
+     */
+    @Test
+    fun `a moderated removal's rollback leaves no violation, audit log entry, or notification behind`() = runTest {
+        val fixture = completedChallengeFixture()
+        val admin = CommentTestSeed.seedUser(username = "moderator")
+
+        val failingChallengeDao = mockk<IChallengeProgressDAO>()
+        every {
+            failingChallengeDao.removeContributionsForPostInCurrentTransaction(any(), any())
+        } throws IllegalStateException("simulated reconciliation failure")
+        val failingRemovalDao = PostRemovalDAO(failingChallengeDao, scoringDao)
+
+        assertThrows<IllegalStateException> {
+            kotlinx.coroutines.runBlocking {
+                failingRemovalDao.removePostAtomically(
+                    fixture.firstPostId,
+                    alwaysRevoke,
+                    ModerationRemoval(
+                        adminId = admin.userId,
+                        reason = ModerationReason.SPAM_OR_MISLEADING,
+                        reasonDetails = null,
+                    ),
+                )
+            }
+        }
+
+        assertTrue(postExists(fixture.firstPostId), "Post must survive a failed removal, so it can be retried")
+        assertEquals(0L, violationCount(fixture.firstPostId), "No violation must survive a rolled-back removal")
+        assertEquals(0L, notificationCount(fixture.userId), "No notification must survive a rolled-back removal")
+        assertEquals(0L, auditLogCount(fixture.firstPostId), "No audit log entry must survive a rolled-back removal")
+    }
+
+    @Test
+    fun `a moderated removal that succeeds commits the violation, audit log entry and notification together with the delete`() = runTest {
+        val fixture = completedChallengeFixture()
+        val admin = CommentTestSeed.seedUser(username = "moderator")
+
+        val outcome = removalDao.removePostAtomically(
+            fixture.firstPostId,
+            alwaysRevoke,
+            ModerationRemoval(
+                adminId = admin.userId,
+                reason = ModerationReason.SPAM_OR_MISLEADING,
+                reasonDetails = null,
+            ),
+        )
+
+        assertFalse(postExists(fixture.firstPostId))
+        assertEquals(1, outcome.deletedRows)
+        assertTrue(outcome.violationId != null)
+        assertEquals(1L, violationCount(fixture.firstPostId))
+        assertEquals(1L, notificationCount(fixture.userId))
+        assertEquals(1L, auditLogCount(fixture.firstPostId))
     }
 }
