@@ -27,4 +27,5 @@ object ChallengeTable : UUIDTable("challenges") {
     val updatedAt = timestampWithTimeZone("updated_at").defaultExpression(CurrentTimestampWithTimeZone)
     val publishedAt = timestampWithTimeZone("published_at").nullable()
     val cancelledAt = timestampWithTimeZone("cancelled_at").nullable()
+    val finalizedAt = timestampWithTimeZone("finalized_at").nullable()
 }

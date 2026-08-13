@@ -56,6 +56,19 @@ fun Route.carFamilyAdminRoutes() {
                 }
             }
 
+            // Preview of every car_models row currently linked to this family (plan §9-E1) — e.g.
+            // the create-challenge wizard's "included models" list.
+            get("/{id}/models") {
+                val id = call.parameters["id"].toUuidOrNull()
+                    ?: return@get call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid id"))
+
+                try {
+                    call.respond(HttpStatusCode.OK, carFamilyService.getModelsForFamily(id))
+                } catch (e: CarFamilyNotFoundException) {
+                    call.respond(HttpStatusCode.NotFound, mapOf("error" to "Car family not found"))
+                }
+            }
+
             // Assigns one or more existing car_models rows to this family. All-or-nothing (plan
             // §9-E4): if any requested id is missing, wrong-brand, or already claimed by a
             // different family, nothing is assigned — see CarFamilyService.assignModels.

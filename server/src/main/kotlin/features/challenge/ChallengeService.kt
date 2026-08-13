@@ -44,6 +44,39 @@ fun effectiveStatus(challenge: Challenge, now: Instant): EffectiveChallengeStatu
 fun canCancelNormally(challenge: Challenge, now: Instant): Boolean =
     effectiveStatus(challenge, now) != EffectiveChallengeStatus.ENDED
 
+/**
+ * A participant's derived state, orthogonal to [EffectiveChallengeStatus] — the user-facing
+ * counterpart of "has this person's reward landed yet". Never persisted; see the plan's §7.2
+ * state table for the full derivation.
+ */
+enum class ParticipantState {
+    NOT_STARTED,
+    IN_PROGRESS,
+    COMPLETED_PENDING,
+    REWARDED,
+    NOT_COMPLETED,
+    REVOKED,
+    CANCELLED,
+}
+
+/**
+ * Pure function, kept top-level so it's testable without a database — same shape as
+ * [effectiveStatus]: given a persisted [Challenge], one participant's [ParticipantProgress], and
+ * the current instant, what state the UI should show for that participant. See the plan's §7.2.
+ */
+fun participantState(challenge: Challenge, progress: ParticipantProgress, now: Instant): ParticipantState {
+    val completed = progress.contributionCount >= challenge.requiredPosts
+    return when {
+        effectiveStatus(challenge, now) == EffectiveChallengeStatus.SCHEDULED -> ParticipantState.NOT_STARTED
+        effectiveStatus(challenge, now) == EffectiveChallengeStatus.CANCELLED -> ParticipantState.CANCELLED
+        progress.rewardState == RewardState.GRANTED -> ParticipantState.REWARDED
+        challenge.finalizedAt == null && !completed -> ParticipantState.IN_PROGRESS
+        challenge.finalizedAt == null && completed -> ParticipantState.COMPLETED_PENDING
+        completed -> ParticipantState.REVOKED
+        else -> ParticipantState.NOT_COMPLETED
+    }
+}
+
 class ChallengeNotFoundException(challengeId: UUID) : RuntimeException("Challenge $challengeId not found")
 
 class ChallengeOverlapException(challengeId: UUID) :

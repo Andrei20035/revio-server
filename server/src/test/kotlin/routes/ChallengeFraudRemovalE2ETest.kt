@@ -181,6 +181,7 @@ class ChallengeFraudRemovalE2ETest {
         postIds.forEach { postId ->
             challengeProgressDao.evaluatePostContribution(challengeId, user.userId, postId, carModelId, now)
         }
+        challengeProgressDao.finalizeParticipants(challengeId)
 
         assertEquals(normalPointsPerPost * requiredPosts + rewardPoints, spotScore(user.userId), "Fixture guard")
 

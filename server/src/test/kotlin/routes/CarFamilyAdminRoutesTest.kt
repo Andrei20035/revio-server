@@ -14,6 +14,7 @@ import com.revio.server.features.car_model.dto.CarModelOption
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -196,5 +197,93 @@ class CarFamilyAdminRoutesTest {
         val response = client.assign(token, family.id, emptyList())
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    // ---------- GET /admin/car-families/{id}/models ----------
+
+    private suspend fun HttpClient.getModels(token: String, familyId: UUID) =
+        get("/api/admin/car-families/$familyId/models") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+    @Test
+    fun `GET family models returns every model linked to the family, ordered by name`() = adminTest { client, token ->
+        val family = client.createFamily(token)
+        val golfVariant = seedModel("volkswagen", "golf variant", familyId = family.id)
+        val golf = seedModel("volkswagen", "golf", familyId = family.id)
+        val golfPlus = seedModel("volkswagen", "golf plus", familyId = family.id)
+
+        val response = client.getModels(token, family.id)
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val models = response.body<List<CarModelOption>>()
+        assertEquals(listOf(golf, golfPlus, golfVariant), models.map { it.id })
+    }
+
+    @Test
+    fun `GET family models excludes models belonging to a different family`() = adminTest { client, token ->
+        val golfFamily = client.createFamily(token, name = "Golf")
+        val idFamily = client.createFamily(token, name = "ID")
+        val golfR = seedModel("volkswagen", "golf r", familyId = golfFamily.id)
+        seedModel("volkswagen", "id.3", familyId = idFamily.id)
+
+        val response = client.getModels(token, golfFamily.id)
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val models = response.body<List<CarModelOption>>()
+        assertEquals(listOf(golfR), models.map { it.id })
+    }
+
+    @Test
+    fun `GET family models returns an empty list for a family with no models`() = adminTest { client, token ->
+        val family = client.createFamily(token)
+
+        val response = client.getModels(token, family.id)
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(emptyList<UUID>(), response.body<List<CarModelOption>>().map { it.id })
+    }
+
+    @Test
+    fun `GET family models returns 404 for an unknown family`() = adminTest { client, token ->
+        val response = client.getModels(token, UUID.randomUUID())
+
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `GET family models returns 400 for a malformed id`() = adminTest { client, token ->
+        val response = client.get("/api/admin/car-families/not-a-uuid/models") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    @Test
+    fun `GET family models rejects a non-admin token with 403`() = testApplication {
+        application { testChallengeAdminModule() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        val seeded = CommentTestSeed.seedUser(username = "plainuser")
+        val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
+            credentialId = seeded.authId,
+            scope = SessionScope.FULL,
+            userId = seeded.userId,
+            deviceId = null,
+            deviceName = null,
+            userAgent = null,
+            ip = null,
+        )
+        val userToken = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
+
+        val response = client.getModels(userToken, UUID.randomUUID())
+
+        assertEquals(HttpStatusCode.Forbidden, response.status)
+    }
+
+    @Test
+    fun `GET family models rejects a request with no token`() = testApplication {
+        application { testChallengeAdminModule() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+
+        val response = client.get("/api/admin/car-families/${UUID.randomUUID()}/models")
+
+        assertEquals(HttpStatusCode.Forbidden, response.status)
     }
 }

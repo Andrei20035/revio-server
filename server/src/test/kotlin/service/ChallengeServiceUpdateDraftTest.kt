@@ -50,6 +50,7 @@ class ChallengeServiceUpdateDraftTest {
         updatedAt = Instant.now(),
         publishedAt = null,
         cancelledAt = null,
+        finalizedAt = null,
     )
 
     private fun service(challengeDao: IChallengeDAO, carFamilyDao: ICarFamilyDAO = mockk { coEvery { exists(any()) } returns true }) =

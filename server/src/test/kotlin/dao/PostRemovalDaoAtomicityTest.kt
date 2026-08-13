@@ -130,6 +130,7 @@ class PostRemovalDaoAtomicityTest {
 
         challengeProgressDao.evaluatePostContribution(challengeId, user.userId, firstPostId, carModelId, now)
         challengeProgressDao.evaluatePostContribution(challengeId, user.userId, secondPostId, carModelId, now)
+        challengeProgressDao.finalizeParticipants(challengeId)
 
         // Guard the fixture itself, so a later assertion failure can't be blamed on bad setup.
         assertEquals(requiredPosts, contributionCount(challengeId, user.userId))

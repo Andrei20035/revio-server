@@ -20,6 +20,7 @@ data class Challenge(
     val updatedAt: Instant,
     val publishedAt: Instant?,
     val cancelledAt: Instant?,
+    val finalizedAt: Instant?,
 )
 
 fun ResultRow.toChallenge(): Challenge = Challenge(
@@ -38,4 +39,5 @@ fun ResultRow.toChallenge(): Challenge = Challenge(
     updatedAt = this[ChallengeTable.updatedAt].toInstant(),
     publishedAt = this[ChallengeTable.publishedAt]?.toInstant(),
     cancelledAt = this[ChallengeTable.cancelledAt]?.toInstant(),
+    finalizedAt = this[ChallengeTable.finalizedAt]?.toInstant(),
 )

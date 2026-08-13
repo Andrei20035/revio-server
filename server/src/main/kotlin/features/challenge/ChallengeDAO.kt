@@ -39,6 +39,21 @@ interface IChallengeDAO {
      */
     suspend fun findCurrentOrNext(now: Instant): Challenge?
 
+    /**
+     * SCHEDULED challenges whose window has ended but haven't been finalized yet
+     * (`ends_at <= now`, `finalized_at IS NULL`), oldest-ended first — the set the finalization
+     * job works through. DRAFT, CANCELLED, still-active, and already-finalized challenges are
+     * never candidates.
+     */
+    suspend fun findDueForFinalization(now: Instant, limit: Int): List<Challenge>
+
+    /**
+     * Marks [id] finalized at [finalizedAt], scoped to `finalized_at IS NULL` in the UPDATE
+     * itself so a concurrent finalize is a harmless no-op rather than overwriting an
+     * already-set timestamp. Returns the number of rows updated (0 or 1).
+     */
+    suspend fun markFinalized(id: UUID, finalizedAt: Instant): Int
+
     suspend fun updateStatus(id: UUID, status: ChallengeStatus, publishedAt: Instant? = null, cancelledAt: Instant? = null): Int
 
     /** Updates only the fields still editable once a challenge is SCHEDULED (title/description). */
@@ -142,6 +157,26 @@ class ChallengeDAO : IChallengeDAO {
             .limit(1)
             .singleOrNull()
             ?.toChallenge()
+    }
+
+    override suspend fun findDueForFinalization(now: Instant, limit: Int): List<Challenge> = transaction {
+        val nowOffset = now.atOffset(ZoneOffset.UTC)
+        ChallengeTable
+            .selectAll()
+            .where {
+                (ChallengeTable.status eq ChallengeStatus.SCHEDULED) and
+                    (ChallengeTable.endsAt lessEq nowOffset) and
+                    (ChallengeTable.finalizedAt.isNull())
+            }
+            .orderBy(ChallengeTable.endsAt to SortOrder.ASC)
+            .limit(limit)
+            .map { it.toChallenge() }
+    }
+
+    override suspend fun markFinalized(id: UUID, finalizedAt: Instant): Int = transaction {
+        ChallengeTable.update({ (ChallengeTable.id eq id) and (ChallengeTable.finalizedAt.isNull()) }) {
+            it[ChallengeTable.finalizedAt] = finalizedAt.atOffset(ZoneOffset.UTC)
+        }
     }
 
     override suspend fun updateStatus(id: UUID, status: ChallengeStatus, publishedAt: Instant?, cancelledAt: Instant?): Int = transaction {

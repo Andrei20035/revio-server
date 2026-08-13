@@ -25,6 +25,8 @@ data class ChallengeDTO(
 data class ChallengeProgressDTO(
     val contributionCount: Int,
     val rewardState: String,
+    /** Nullable so an older client (built before this field existed) still deserializes this response. */
+    val participantState: String? = null,
 )
 
 @Serializable
@@ -37,11 +39,13 @@ data class ChallengeContributionDTO(
     val carModel: String? = null,
 )
 
-/** Response for GET /challenges/current. Both fields null when no challenge is scheduled at all. */
+/** Response for GET /challenges/current. All fields null when no challenge is scheduled at all. */
 @Serializable
 data class CurrentChallengeDTO(
     val challenge: ChallengeDTO?,
     val progress: ChallengeProgressDTO?,
+    /** Nullable so an older client (built before this field existed) still deserializes this response. */
+    val effectiveStatus: String? = null,
 )
 
 /** Response for GET /challenges/{id}/progress. */

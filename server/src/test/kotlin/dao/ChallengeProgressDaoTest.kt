@@ -5,6 +5,7 @@ import com.revio.server.features.challenge.ChallengeParticipantTable
 import com.revio.server.features.challenge.ChallengeProgressDAO
 import com.revio.server.features.challenge.ChallengeRewardLedgerTable
 import com.revio.server.features.challenge.ContributionEvaluation
+import com.revio.server.features.challenge.FinalizationResult
 import com.revio.server.features.challenge.LedgerEntryKind
 import com.revio.server.features.challenge.LedgerReason
 import com.revio.server.features.challenge.RewardState
@@ -15,6 +16,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -32,6 +34,7 @@ import testutils.ChallengeTestSeed
 import testutils.CommentTestSeed
 import testutils.TestDatabaseFactory
 import java.time.Instant
+import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 
@@ -88,6 +91,29 @@ class ChallengeProgressDaoTest {
             .where { ChallengeContributionTable.challengeId eq challengeId }
             .count()
             .toInt()
+    }
+
+    /** Inserts a participant row directly, bypassing evaluatePostContribution's own grant/revoke. */
+    private fun seedParticipant(challengeId: UUID, userId: UUID, rewardState: RewardState, contributionCountCache: Int, awardEpoch: Int = 0) = transaction {
+        ChallengeParticipantTable.insert {
+            it[ChallengeParticipantTable.challengeId] = challengeId
+            it[ChallengeParticipantTable.userId] = userId
+            it[ChallengeParticipantTable.contributionCount] = contributionCountCache
+            it[ChallengeParticipantTable.rewardState] = rewardState
+            it[ChallengeParticipantTable.awardEpoch] = awardEpoch
+        }
+    }
+
+    /** Inserts one real contribution row (with a real backing post) directly. */
+    private fun seedContribution(challengeId: UUID, userId: UUID, modelId: UUID) = transaction {
+        val postId = ChallengeTestSeed.seedCameraPost(userId, modelId)
+        ChallengeContributionTable.insert {
+            it[ChallengeContributionTable.challengeId] = challengeId
+            it[ChallengeContributionTable.userId] = userId
+            it[ChallengeContributionTable.postId] = postId
+            it[ChallengeContributionTable.carModelId] = modelId
+            it[ChallengeContributionTable.postCreatedAt] = Instant.now().atOffset(ZoneOffset.UTC)
+        }
     }
 
     private fun postIdOfOnlyContribution(userId: UUID): UUID = transaction {
@@ -194,27 +220,45 @@ class ChallengeProgressDaoTest {
         val result = dao.evaluatePostContribution(challengeId, user.userId, postId, onlyModel, now)
 
         assertTrue(result.eligible)
-        assertTrue(result.rewardGranted)
+        assertEquals(1, result.contributionCount)
     }
 
     // ---------- C. contribution is independent of posts.points (daily-cap overflow) ----------
 
     @Test
-    fun `a post with points=0 (over the daily camera cap) still counts as a contribution`() = runBlocking {
+    fun `a post with points=0 (over the daily camera cap) still counts as a contribution, granted in full at finalization`() = runBlocking {
         val f = fixture(requiredPosts = 1)
+        setSpotScore(f.userId, 0)
         val overCapPost = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId, points = 0)
 
         val result = dao.evaluatePostContribution(f.challengeId, f.userId, overCapPost, f.modelId, Instant.now())
 
         assertTrue(result.eligible)
-        assertTrue(result.rewardGranted)
-        assertEquals(300, spotScore(f.userId), "The reward is granted in full even though the triggering post itself earned 0 normal points")
+        assertEquals(1, result.contributionCount)
+
+        dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(300, spotScore(f.userId), "The reward is granted in full at finalization even though the triggering post itself earned 0 normal points")
     }
 
     // ---------- D. grant / revoke / re-grant mechanics ----------
 
     @Test
-    fun `reaching requiredPosts grants exactly once, with a THRESHOLD_REACHED ledger row at epoch 0`() = runBlocking {
+    fun `a post that reaches requiredPosts does not modify spot_score or write to the ledger (plan §9-C7)`() = runBlocking {
+        val f = fixture(requiredPosts = 1, rewardPoints = 300)
+        setSpotScore(f.userId, 0)
+        val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
+
+        val result = dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+
+        assertTrue(result.eligible)
+        assertEquals(1, result.contributionCount)
+        assertEquals(0, spotScore(f.userId), "spot_score must be untouched — granting only happens at finalization")
+        assertTrue(ledgerRows(f.challengeId, f.userId).isEmpty(), "no ledger row until finalization")
+    }
+
+    @Test
+    fun `reaching requiredPosts does not grant immediately - finalization grants exactly once, with a THRESHOLD_REACHED ledger row at epoch 0`() = runBlocking {
         val f = fixture(requiredPosts = 3, rewardPoints = 300)
         setSpotScore(f.userId, 0)
 
@@ -224,8 +268,13 @@ class ChallengeProgressDaoTest {
             lastResult = dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
         }
 
-        assertTrue(lastResult.rewardGranted)
         assertEquals(3, lastResult.contributionCount)
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState], "reaching the threshold must not grant before finalization")
+        assertEquals(0, spotScore(f.userId))
+
+        val finalization = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(1, finalization.grantedCount)
         assertEquals(300, spotScore(f.userId))
 
         val ledger = ledgerRows(f.challengeId, f.userId)
@@ -251,17 +300,20 @@ class ChallengeProgressDaoTest {
     }
 
     @Test
-    fun `re-evaluating the same postId is idempotent - no duplicate contribution, no double grant`() = runBlocking {
+    fun `re-evaluating the same postId is idempotent - no duplicate contribution, so finalization grants only once`() = runBlocking {
         val f = fixture(requiredPosts = 1)
+        setSpotScore(f.userId, 0)
         val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
 
         val first = dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
         val second = dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
 
-        assertTrue(first.rewardGranted)
-        assertFalse(second.rewardGranted, "Already GRANTED — the retried evaluation must not grant again")
+        assertEquals(1, first.contributionCount)
         assertEquals(1, second.contributionCount, "ON CONFLICT DO NOTHING must not create a second contribution row")
-        assertEquals(300, spotScore(f.userId))
+
+        dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(300, spotScore(f.userId), "only one contribution recorded, so only one grant's worth of points")
         assertEquals(1, ledgerRows(f.challengeId, f.userId).size)
     }
 
@@ -270,6 +322,7 @@ class ChallengeProgressDaoTest {
         val f = fixture(requiredPosts = 2)
         val posts = (1..2).map { ChallengeTestSeed.seedCameraPost(f.userId, f.modelId) }
         posts.forEach { dao.evaluatePostContribution(f.challengeId, f.userId, it, f.modelId, Instant.now()) }
+        dao.finalizeParticipants(f.challengeId)
         assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
 
         val reversals = transaction { dao.removeContributionsForPostInCurrentTransaction(posts[0]) { true } }
@@ -295,6 +348,7 @@ class ChallengeProgressDaoTest {
             val f = fixture(requiredPosts = 5)
             val posts = (1..5).map { ChallengeTestSeed.seedCameraPost(f.userId, f.modelId) }
             posts.forEach { dao.evaluatePostContribution(f.challengeId, f.userId, it, f.modelId, Instant.now()) }
+            dao.finalizeParticipants(f.challengeId)
             assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
 
             val reversals = transaction { dao.removeContributionsForPostInCurrentTransaction(posts[deleteIndex]) { true } }
@@ -323,13 +377,18 @@ class ChallengeProgressDaoTest {
         val f = fixture(requiredPosts = 2)
         val posts = (1..2).map { ChallengeTestSeed.seedCameraPost(f.userId, f.modelId) }
         posts.forEach { dao.evaluatePostContribution(f.challengeId, f.userId, it, f.modelId, Instant.now()) }
+        dao.finalizeParticipants(f.challengeId)
         transaction { dao.removeContributionsForPostInCurrentTransaction(posts[0]) { true } }
         assertEquals(RewardState.NONE, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
 
         val replacementPost = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
         val result = dao.evaluatePostContribution(f.challengeId, f.userId, replacementPost, f.modelId, Instant.now())
+        assertEquals(2, result.contributionCount)
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState], "reaching the threshold again must not re-grant before finalization")
 
-        assertTrue(result.rewardGranted)
+        val finalization = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(1, finalization.grantedCount)
         assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
         assertEquals(1, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.awardEpoch])
         assertEquals(300, spotScore(f.userId))
@@ -349,6 +408,7 @@ class ChallengeProgressDaoTest {
         repeat(3) {
             val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
             dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+            dao.finalizeParticipants(f.challengeId)
             assertEquals(100, spotScore(f.userId))
             transaction { dao.removeContributionsForPostInCurrentTransaction(postId) { true } }
             assertEquals(0, spotScore(f.userId))
@@ -364,6 +424,7 @@ class ChallengeProgressDaoTest {
         val f = fixture(requiredPosts = 1)
         val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
         dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+        dao.finalizeParticipants(f.challengeId)
         assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
 
         // REVOKE_AFTER_END = true in production policy: revoke regardless of endsAt.
@@ -378,6 +439,7 @@ class ChallengeProgressDaoTest {
         val f = fixture(requiredPosts = 1)
         val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
         dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+        dao.finalizeParticipants(f.challengeId)
 
         // Simulates a REVOKE_AFTER_END=false policy: the DAO stays policy-free (per its KDoc) and
         // does exactly what the caller's predicate says.
@@ -403,6 +465,7 @@ class ChallengeProgressDaoTest {
         val f = fixture(requiredPosts = 1, rewardPoints = 300)
         val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
         dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+        dao.finalizeParticipants(f.challengeId)
         setSpotScore(f.userId, 100) // simulate other point sources having been spent/reversed down to 100
 
         transaction { dao.removeContributionsForPostInCurrentTransaction(postId) { true } }
@@ -427,6 +490,7 @@ class ChallengeProgressDaoTest {
             val postId = ChallengeTestSeed.seedCameraPost(user.userId, modelId)
             dao.evaluatePostContribution(challengeId, user.userId, postId, modelId, now)
         }
+        dao.finalizeParticipants(challengeId)
 
         val revokedCount = dao.revokeAllGrantedRewards(challengeId, LedgerReason.CHALLENGE_CANCELLED)
 
@@ -444,6 +508,7 @@ class ChallengeProgressDaoTest {
         val f = fixture(requiredPosts = 1)
         val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
         dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+        dao.finalizeParticipants(f.challengeId)
 
         val firstRun = dao.revokeAllGrantedRewards(f.challengeId, LedgerReason.ADMIN_REVOKE_ALL)
         val secondRun = dao.revokeAllGrantedRewards(f.challengeId, LedgerReason.ADMIN_REVOKE_ALL)
@@ -481,6 +546,7 @@ class ChallengeProgressDaoTest {
             val postId = ChallengeTestSeed.seedCameraPost(user.userId, modelId)
             dao.evaluatePostContribution(challengeId, user.userId, postId, modelId, now)
         }
+        dao.finalizeParticipants(challengeId)
 
         // Simulate an interrupted first run: one participant already revoked "by hand".
         val firstUserPostId = postIdOfOnlyContribution(users[0].userId)
@@ -567,7 +633,7 @@ class ChallengeProgressDaoTest {
     // ---------- H. concurrency — real threads, not runTest's virtual-time dispatcher ----------
 
     @Test
-    fun `5 concurrent posts from zero grant exactly once`() {
+    fun `5 concurrent posts from zero record all 5 contributions - finalization then grants exactly once`() {
         val f = fixture(requiredPosts = 5)
         val postIds = (1..5).map { ChallengeTestSeed.seedCameraPost(f.userId, f.modelId) }
 
@@ -578,13 +644,17 @@ class ChallengeProgressDaoTest {
         }
 
         assertEquals(5, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.contributionCount])
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+
+        runBlocking { dao.finalizeParticipants(f.challengeId) }
+
         assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
         assertEquals(300, spotScore(f.userId))
         assertEquals(1, ledgerRows(f.challengeId, f.userId).count { it[ChallengeRewardLedgerTable.kind] == LedgerEntryKind.GRANT })
     }
 
     @Test
-    fun `2 concurrent posts reaching the threshold from 4 out of 5 grant exactly once`() {
+    fun `2 concurrent posts reaching the threshold from 4 out of 5 record 6 contributions - finalization then grants exactly once`() {
         val f = fixture(requiredPosts = 5)
         // 4 sequential contributions first, so the concurrent pair races to be the 5th.
         repeat(4) {
@@ -600,7 +670,160 @@ class ChallengeProgressDaoTest {
         }
 
         assertEquals(6, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.contributionCount])
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+
+        runBlocking { dao.finalizeParticipants(f.challengeId) }
+
         assertEquals(1, ledgerRows(f.challengeId, f.userId).count { it[ChallengeRewardLedgerTable.kind] == LedgerEntryKind.GRANT })
         assertEquals(300, spotScore(f.userId))
+    }
+
+    // ---------- I. finalizeParticipants — the per-participant engine behind finalization (plan §9-C1) ----------
+
+    @Test
+    fun `finalizeParticipants grants a participant who reached required posts but is still NONE`() = runBlocking {
+        val f = fixture(requiredPosts = 3, rewardPoints = 300)
+        setSpotScore(f.userId, 0)
+        repeat(3) { seedContribution(f.challengeId, f.userId, f.modelId) }
+        seedParticipant(f.challengeId, f.userId, RewardState.NONE, contributionCountCache = 3)
+
+        val result = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(FinalizationResult(grantedCount = 1, revokedCount = 0), result)
+        assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+        assertEquals(300, spotScore(f.userId))
+        val ledger = ledgerRows(f.challengeId, f.userId)
+        assertEquals(1, ledger.size)
+        assertEquals(LedgerEntryKind.GRANT, ledger[0][ChallengeRewardLedgerTable.kind])
+        assertEquals(LedgerReason.THRESHOLD_REACHED, ledger[0][ChallengeRewardLedgerTable.reason])
+    }
+
+    @Test
+    fun `finalizeParticipants is a no-op for a participant already GRANTED and still above threshold`() = runBlocking {
+        val f = fixture(requiredPosts = 3, rewardPoints = 300)
+        setSpotScore(f.userId, 300)
+        repeat(3) { seedContribution(f.challengeId, f.userId, f.modelId) }
+        seedParticipant(f.challengeId, f.userId, RewardState.GRANTED, contributionCountCache = 3)
+
+        val result = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(FinalizationResult(grantedCount = 0, revokedCount = 0), result)
+        assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+        assertEquals(300, spotScore(f.userId))
+        assertTrue(ledgerRows(f.challengeId, f.userId).isEmpty(), "a no-op must not write a ledger row")
+    }
+
+    @Test
+    fun `finalizeParticipants revokes a GRANTED participant who has since dropped below threshold`() = runBlocking {
+        val f = fixture(requiredPosts = 3, rewardPoints = 300)
+        setSpotScore(f.userId, 300)
+        seedContribution(f.challengeId, f.userId, f.modelId)
+        seedParticipant(f.challengeId, f.userId, RewardState.GRANTED, contributionCountCache = 1)
+
+        val result = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(FinalizationResult(grantedCount = 0, revokedCount = 1), result)
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+        assertEquals(0, spotScore(f.userId))
+        val ledger = ledgerRows(f.challengeId, f.userId)
+        assertEquals(1, ledger.size)
+        assertEquals(LedgerEntryKind.REVOKE, ledger[0][ChallengeRewardLedgerTable.kind])
+        assertEquals(LedgerReason.CONTRIBUTION_REMOVED, ledger[0][ChallengeRewardLedgerTable.reason])
+    }
+
+    @Test
+    fun `finalizeParticipants is a no-op for a participant who never reached threshold and is still NONE`() = runBlocking {
+        val f = fixture(requiredPosts = 5)
+        seedContribution(f.challengeId, f.userId, f.modelId)
+        seedParticipant(f.challengeId, f.userId, RewardState.NONE, contributionCountCache = 1)
+
+        val result = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(FinalizationResult(grantedCount = 0, revokedCount = 0), result)
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+        assertTrue(ledgerRows(f.challengeId, f.userId).isEmpty())
+    }
+
+    @Test
+    fun `finalizeParticipants recounts from challenge_contributions rather than trusting the cached contributionCount`() = runBlocking {
+        val f = fixture(requiredPosts = 3, rewardPoints = 300)
+        setSpotScore(f.userId, 0)
+        repeat(3) { seedContribution(f.challengeId, f.userId, f.modelId) }
+        // Cached counter deliberately stale — the real count in challenge_contributions is 3.
+        seedParticipant(f.challengeId, f.userId, RewardState.NONE, contributionCountCache = 0)
+
+        val result = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(1, result.grantedCount)
+        assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+    }
+
+    @Test
+    fun `finalizeParticipants tallies grants and revokes across multiple participants in one call`() = runBlocking {
+        val f = fixture(requiredPosts = 2, rewardPoints = 100)
+        val userB = CommentTestSeed.seedUser(username = "bob").userId
+        val userC = CommentTestSeed.seedUser(username = "carol").userId
+        setSpotScore(f.userId, 0)
+        setSpotScore(userB, 100)
+        setSpotScore(userC, 0)
+
+        repeat(2) { seedContribution(f.challengeId, f.userId, f.modelId) }
+        seedParticipant(f.challengeId, f.userId, RewardState.NONE, contributionCountCache = 2)
+
+        seedContribution(f.challengeId, userB, f.modelId)
+        seedParticipant(f.challengeId, userB, RewardState.GRANTED, contributionCountCache = 1)
+
+        seedParticipant(f.challengeId, userC, RewardState.NONE, contributionCountCache = 0)
+
+        val result = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(FinalizationResult(grantedCount = 1, revokedCount = 1), result)
+        assertEquals(RewardState.GRANTED, participantRow(f.challengeId, f.userId)!![ChallengeParticipantTable.rewardState])
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, userB)!![ChallengeParticipantTable.rewardState])
+        assertEquals(RewardState.NONE, participantRow(f.challengeId, userC)!![ChallengeParticipantTable.rewardState])
+    }
+
+    // ---------- I2. finalizeParticipants — idempotency of a re-run (plan §9-C2) ----------
+
+    @Test
+    fun `re-running finalizeParticipants after a grant moves spot_score and the ledger only once`() = runBlocking {
+        val f = fixture(requiredPosts = 3, rewardPoints = 300)
+        setSpotScore(f.userId, 0)
+        repeat(3) { seedContribution(f.challengeId, f.userId, f.modelId) }
+        seedParticipant(f.challengeId, f.userId, RewardState.NONE, contributionCountCache = 3)
+
+        val first = dao.finalizeParticipants(f.challengeId)
+        val scoreAfterFirst = spotScore(f.userId)
+        val ledgerCountAfterFirst = ledgerRows(f.challengeId, f.userId).size
+
+        val second = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(FinalizationResult(grantedCount = 1, revokedCount = 0), first)
+        assertEquals(FinalizationResult(grantedCount = 0, revokedCount = 0), second)
+        assertEquals(scoreAfterFirst, spotScore(f.userId))
+        assertEquals(300, spotScore(f.userId))
+        assertEquals(ledgerCountAfterFirst, ledgerRows(f.challengeId, f.userId).size)
+        assertEquals(1, ledgerRows(f.challengeId, f.userId).size)
+    }
+
+    @Test
+    fun `re-running finalizeParticipants after a revoke moves spot_score and the ledger only once`() = runBlocking {
+        val f = fixture(requiredPosts = 3, rewardPoints = 300)
+        setSpotScore(f.userId, 300)
+        seedContribution(f.challengeId, f.userId, f.modelId)
+        seedParticipant(f.challengeId, f.userId, RewardState.GRANTED, contributionCountCache = 1)
+
+        val first = dao.finalizeParticipants(f.challengeId)
+        val scoreAfterFirst = spotScore(f.userId)
+        val ledgerCountAfterFirst = ledgerRows(f.challengeId, f.userId).size
+
+        val second = dao.finalizeParticipants(f.challengeId)
+
+        assertEquals(FinalizationResult(grantedCount = 0, revokedCount = 1), first)
+        assertEquals(FinalizationResult(grantedCount = 0, revokedCount = 0), second)
+        assertEquals(scoreAfterFirst, spotScore(f.userId))
+        assertEquals(0, spotScore(f.userId))
+        assertEquals(ledgerCountAfterFirst, ledgerRows(f.challengeId, f.userId).size)
+        assertEquals(1, ledgerRows(f.challengeId, f.userId).size)
     }
 }

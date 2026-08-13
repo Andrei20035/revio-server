@@ -243,6 +243,7 @@ class ChallengeHistoryDaoTest {
         )
         val post1 = ChallengeTestSeed.seedCameraPost(user.userId, modelId)
         progressDao.evaluatePostContribution(completedChallenge, user.userId, post1, modelId, completedWindowPost)
+        progressDao.finalizeParticipants(completedChallenge)
 
         // Challenge 2: joined, not completed. A separate window, far from the first.
         val incompleteWindowPost = now.minusSeconds(10 * 3600)
@@ -275,6 +276,7 @@ class ChallengeHistoryDaoTest {
         )
         val postId = ChallengeTestSeed.seedCameraPost(user.userId, modelId)
         progressDao.evaluatePostContribution(challengeId, user.userId, postId, modelId, now)
+        progressDao.finalizeParticipants(challengeId)
 
         // Drop the user's spot_score below the reward amount before revoking, so the revoke's
         // applied_delta is floored short of -300 — the same scenario ChallengeProgressDaoTest

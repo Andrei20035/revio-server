@@ -8,4 +8,5 @@ val challengeModule = module {
     single<IChallengeProgressDAO> { ChallengeProgressDAO() }
     single<IChallengeService> { ChallengeService(get(), get(), get<ICarFamilyDAO>()) }
     single<IChallengeProgressService> { ChallengeProgressService(get(), get()) }
+    single<IChallengeFinalizationService> { ChallengeFinalizationService(get(), get()) }
 }

@@ -14,9 +14,11 @@ import com.revio.server.features.challenge.dto.ChallengeSummaryDTO
 import com.revio.server.features.challenge.dto.CurrentChallengeDTO
 import com.revio.server.features.challenge.dto.MyChallengesDTO
 import io.ktor.http.*
+import io.ktor.server.application.Application
 import io.ktor.server.auth.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.launch
 import org.koin.ktor.ext.inject
 import java.time.Instant
 
@@ -38,9 +40,10 @@ private fun Challenge.toDTO(family: CarFamily?): ChallengeDTO = ChallengeDTO(
     endsAt = endsAt,
 )
 
-private fun ParticipantProgress.toDTO() = ChallengeProgressDTO(
+private fun ParticipantProgress.toDTO(challenge: Challenge, now: Instant) = ChallengeProgressDTO(
     contributionCount = contributionCount,
     rewardState = rewardState.name,
+    participantState = participantState(challenge, this, now).name,
 )
 
 private fun ChallengeUserAggregates.toDTO() = ChallengeSummaryDTO(
@@ -51,6 +54,31 @@ private fun ChallengeUserAggregates.toDTO() = ChallengeSummaryDTO(
 )
 
 /**
+ * Cheap catch-up probe (plan §9-C8): checks the partial index
+ * (idx_challenges_pending_finalization, migration V28) for a due challenge and, if one exists,
+ * finalizes it on the application's own coroutine scope — fire-and-forget, never awaited, wrapped
+ * in runCatching so neither the probe nor the background finalization can ever fail this request.
+ * Same best-effort principle as PostService's own challenge evaluation on post creation.
+ */
+private suspend fun triggerFinalizationCatchUp(
+    application: Application,
+    challengeDao: IChallengeDAO,
+    challengeFinalizationService: IChallengeFinalizationService,
+) {
+    runCatching {
+        val now = Instant.now()
+        val due = challengeDao.findDueForFinalization(now, limit = 1)
+        if (due.isNotEmpty()) {
+            application.launch {
+                runCatching {
+                    due.forEach { challenge -> challengeFinalizationService.finalize(challenge.id, now) }
+                }
+            }
+        }
+    }
+}
+
+/**
  * Read-only, user-facing challenge endpoints (plan §5's "Utilizator" table). All instants are
  * UTC ISO-8601 — the client converts to the viewer's own timezone, never the server.
  */
@@ -59,14 +87,19 @@ fun Route.challengeRoutes() {
     val challengeProgressService: IChallengeProgressService by application.inject()
     val carFamilyService: ICarFamilyService by application.inject()
     val storageService: IStorageService by application.inject()
+    val challengeDao: IChallengeDAO by application.inject()
+    val challengeFinalizationService: IChallengeFinalizationService by application.inject()
 
     route("/challenges") {
         authenticate("jwt") {
             get("/current") {
+                triggerFinalizationCatchUp(call.application, challengeDao, challengeFinalizationService)
+
                 val userId = call.getUuidClaim("userId")
                     ?: return@get call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid userId claim"))
 
-                val challenge = challengeService.findCurrentOrNext(Instant.now())
+                val now = Instant.now()
+                val challenge = challengeService.findCurrentOrNext(now)
                 if (challenge == null) {
                     call.respond(HttpStatusCode.OK, CurrentChallengeDTO(challenge = null, progress = null))
                     return@get
@@ -78,12 +111,15 @@ fun Route.challengeRoutes() {
                     HttpStatusCode.OK,
                     CurrentChallengeDTO(
                         challenge = challenge.toDTO(family),
-                        progress = progress.toDTO(),
+                        progress = progress.toDTO(challenge, now),
+                        effectiveStatus = effectiveStatus(challenge, now).name,
                     ),
                 )
             }
 
             get("/me") {
+                triggerFinalizationCatchUp(call.application, challengeDao, challengeFinalizationService)
+
                 val userId = call.getUuidClaim("userId")
                     ?: return@get call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid userId claim"))
 
@@ -103,6 +139,7 @@ fun Route.challengeRoutes() {
                 }
 
                 try {
+                    val now = Instant.now()
                     val page = challengeProgressService.listUserHistory(userId, limit, cursorEndsAt, cursorId, filter)
                     // Summary only on the first page — see MyChallengesDTO's KDoc.
                     val summary = if (cursorEndsAt == null && cursorId == null) {
@@ -121,7 +158,7 @@ fun Route.challengeRoutes() {
                                 ChallengeHistoryItemDTO(
                                     challenge = item.challenge.toDTO(families[item.challenge.targetFamilyId]),
                                     effectiveStatus = item.effectiveStatus.name,
-                                    progress = item.progress.toDTO(),
+                                    progress = item.progress.toDTO(item.challenge, now),
                                 )
                             },
                             hasMore = page.hasMore,
@@ -153,7 +190,7 @@ fun Route.challengeRoutes() {
                 val userId = call.getUuidClaim("userId")
                     ?: return@get call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid userId claim"))
 
-                challengeService.findById(id)
+                val challenge = challengeService.findPublicById(id)
                     ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "Challenge not found"))
 
                 val progress = challengeProgressService.getUserProgress(id, userId)
@@ -162,7 +199,7 @@ fun Route.challengeRoutes() {
                 call.respond(
                     HttpStatusCode.OK,
                     ChallengeProgressDetailDTO(
-                        progress = progress.toDTO(),
+                        progress = progress.toDTO(challenge, Instant.now()),
                         contributions = contributions.map {
                             ChallengeContributionDTO(
                                 postId = it.postId,

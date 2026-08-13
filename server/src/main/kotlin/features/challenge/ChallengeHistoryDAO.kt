@@ -83,6 +83,7 @@ class ChallengeHistoryDAO : IChallengeHistoryDAO {
                 ChallengeTable.updatedAt,
                 ChallengeTable.publishedAt,
                 ChallengeTable.cancelledAt,
+                ChallengeTable.finalizedAt,
                 ChallengeParticipantTable.contributionCount,
                 ChallengeParticipantTable.rewardState,
             )

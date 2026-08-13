@@ -12,8 +12,12 @@ import com.revio.server.features.challenge.EffectiveChallengeStatus
 import com.revio.server.features.challenge.IChallengeDAO
 import com.revio.server.features.challenge.IChallengeProgressDAO
 import com.revio.server.features.challenge.LedgerReason
+import com.revio.server.features.challenge.ParticipantProgress
+import com.revio.server.features.challenge.ParticipantState
+import com.revio.server.features.challenge.RewardState
 import com.revio.server.features.challenge.canCancelNormally
 import com.revio.server.features.challenge.effectiveStatus
+import com.revio.server.features.challenge.participantState
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -50,12 +54,14 @@ class ChallengeServiceTest {
         status: ChallengeStatus = ChallengeStatus.DRAFT,
         startsAt: Instant = Instant.now(),
         endsAt: Instant = Instant.now().plusSeconds(3600),
+        requiredPosts: Int = 5,
+        finalizedAt: Instant? = null,
     ) = Challenge(
         id = id,
         title = "Weekend Golf Hunt",
         description = null,
         targetFamilyId = familyId,
-        requiredPosts = 5,
+        requiredPosts = requiredPosts,
         rewardPoints = 300,
         startsAt = startsAt,
         endsAt = endsAt,
@@ -66,6 +72,7 @@ class ChallengeServiceTest {
         updatedAt = Instant.now(),
         publishedAt = null,
         cancelledAt = null,
+        finalizedAt = finalizedAt,
     )
 
     private fun service(
@@ -117,6 +124,81 @@ class ChallengeServiceTest {
         assertTrue(canCancelNormally(challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(10), endsAt = now.plusSeconds(10)), now))
         assertTrue(canCancelNormally(challenge(status = ChallengeStatus.CANCELLED), now))
         assertFalse(canCancelNormally(challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(20), endsAt = now.minusSeconds(10)), now))
+    }
+
+    // ---------- participantState — pure function (plan §7.2) ----------
+
+    private fun progress(count: Int, rewardState: RewardState = RewardState.NONE) =
+        ParticipantProgress(contributionCount = count, rewardState = rewardState)
+
+    @Test
+    fun `participantState is NOT_STARTED when the challenge hasn't started yet`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.plusSeconds(100), endsAt = now.plusSeconds(200))
+        assertEquals(ParticipantState.NOT_STARTED, participantState(c, progress(0), now))
+    }
+
+    @Test
+    fun `participantState is CANCELLED when the challenge was cancelled, regardless of progress`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.CANCELLED, startsAt = now.minusSeconds(100), endsAt = now.plusSeconds(100))
+        assertEquals(ParticipantState.CANCELLED, participantState(c, progress(5, RewardState.GRANTED), now))
+    }
+
+    @Test
+    fun `participantState is IN_PROGRESS while active and below the threshold`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(100), endsAt = now.plusSeconds(100), requiredPosts = 5)
+        assertEquals(ParticipantState.IN_PROGRESS, participantState(c, progress(4), now))
+    }
+
+    @Test
+    fun `participantState is COMPLETED_PENDING exactly at the threshold, before finalization`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(100), endsAt = now.plusSeconds(100), requiredPosts = 5)
+        assertEquals(ParticipantState.COMPLETED_PENDING, participantState(c, progress(5), now))
+    }
+
+    @Test
+    fun `participantState is COMPLETED_PENDING after ends_at but before finalization has run`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(200), endsAt = now.minusSeconds(100), requiredPosts = 5, finalizedAt = null)
+        assertEquals(ParticipantState.COMPLETED_PENDING, participantState(c, progress(5), now))
+    }
+
+    @Test
+    fun `participantState is REWARDED once reward_state is GRANTED, even before finalized_at is set`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(100), endsAt = now.plusSeconds(100), requiredPosts = 5, finalizedAt = null)
+        assertEquals(ParticipantState.REWARDED, participantState(c, progress(5, RewardState.GRANTED), now))
+    }
+
+    @Test
+    fun `participantState is NOT_COMPLETED after finalization when the threshold was never reached`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(200), endsAt = now.minusSeconds(100), requiredPosts = 5, finalizedAt = now.minusSeconds(50))
+        assertEquals(ParticipantState.NOT_COMPLETED, participantState(c, progress(3), now))
+    }
+
+    @Test
+    fun `participantState is NOT_COMPLETED one post short of the threshold, at the boundary`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(200), endsAt = now.minusSeconds(100), requiredPosts = 5, finalizedAt = now.minusSeconds(50))
+        assertEquals(ParticipantState.NOT_COMPLETED, participantState(c, progress(4), now))
+    }
+
+    @Test
+    fun `participantState is REVOKED after finalization when reward_state was reset to NONE despite meeting the threshold`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(200), endsAt = now.minusSeconds(100), requiredPosts = 5, finalizedAt = now.minusSeconds(50))
+        assertEquals(ParticipantState.REVOKED, participantState(c, progress(5, RewardState.NONE), now))
+    }
+
+    @Test
+    fun `participantState is REWARDED after finalization when the threshold was met and never revoked`() {
+        val now = Instant.now()
+        val c = challenge(status = ChallengeStatus.SCHEDULED, startsAt = now.minusSeconds(200), endsAt = now.minusSeconds(100), requiredPosts = 5, finalizedAt = now.minusSeconds(50))
+        assertEquals(ParticipantState.REWARDED, participantState(c, progress(5, RewardState.GRANTED), now))
     }
 
     // ---------- createDraft — validation ----------

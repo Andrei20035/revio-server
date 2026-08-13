@@ -32,10 +32,12 @@ import com.revio.server.features.car_family.ICarFamilyDAO
 import com.revio.server.features.car_family.ICarFamilyService
 import com.revio.server.features.car_family.carFamilyAdminRoutes
 import com.revio.server.features.challenge.ChallengeDAO
+import com.revio.server.features.challenge.ChallengeFinalizationService
 import com.revio.server.features.challenge.ChallengeProgressDAO
 import com.revio.server.features.challenge.ChallengeProgressService
 import com.revio.server.features.challenge.ChallengeService
 import com.revio.server.features.challenge.IChallengeDAO
+import com.revio.server.features.challenge.IChallengeFinalizationService
 import com.revio.server.features.challenge.IChallengeProgressDAO
 import com.revio.server.features.challenge.IChallengeProgressService
 import com.revio.server.features.challenge.IChallengeService
@@ -556,7 +558,7 @@ fun Application.testReportAdminModule(reportService: IReportService) {
  * behind them — these tests exercise actual DB behavior (pagination, atomic assignment, DRAFT
  * status races), and the end-to-end admin workflow test spans both route groups in one flow.
  */
-fun Application.testChallengeAdminModule() {
+fun Application.testChallengeAdminModule(cronSecret: String? = null) {
     val koinTestModule = module {
         single<ICarModelDAO> { CarModelDAO() }
         single<ICarFamilyDAO> { CarFamilyDAO() }
@@ -565,6 +567,7 @@ fun Application.testChallengeAdminModule() {
         single<IChallengeProgressDAO> { ChallengeProgressDAO() }
         single<IChallengeService> { ChallengeService(get(), get(), get()) }
         single<IChallengeProgressService> { ChallengeProgressService(get(), get()) }
+        single<IChallengeFinalizationService> { ChallengeFinalizationService(get(), get()) }
         single<IAuthSessionDAO> { AuthSessionDAO() }
         single { RefreshTokenGenerator() }
         single<ISessionService> { SessionService(get(), get()) }
@@ -586,7 +589,7 @@ fun Application.testChallengeAdminModule() {
 
     routing {
         route("/api") {
-            challengeAdminRoutes()
+            challengeAdminRoutes(cronSecretProvider = { cronSecret })
             carFamilyAdminRoutes()
         }
     }
@@ -607,6 +610,7 @@ fun Application.testChallengeModule() {
         single<IChallengeProgressDAO> { ChallengeProgressDAO() }
         single<IChallengeService> { ChallengeService(get(), get(), get()) }
         single<IChallengeProgressService> { ChallengeProgressService(get(), get()) }
+        single<IChallengeFinalizationService> { ChallengeFinalizationService(get(), get()) }
         single<IAuthSessionDAO> { AuthSessionDAO() }
         single { RefreshTokenGenerator() }
         single<ISessionService> { SessionService(get(), get()) }

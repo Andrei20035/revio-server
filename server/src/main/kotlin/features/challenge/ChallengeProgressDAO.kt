@@ -40,6 +40,12 @@ data class ContributionReversal(
     val rewardRevoked: Boolean,
 )
 
+/** Outcome of reconciling one challenge's participants during finalization (plan §9-C). */
+data class FinalizationResult(
+    val grantedCount: Int,
+    val revokedCount: Int,
+)
+
 /** One user's read-only progress snapshot on one challenge. */
 data class ParticipantProgress(
     val contributionCount: Int,
@@ -65,16 +71,17 @@ data class ContributionSummary(
 interface IChallengeProgressDAO {
     /**
      * Evaluates whether [postId] (owned by [userId], created at [postCreatedAt] with
-     * [carModelId]) contributes to [challengeId], and reconciles the completion reward in the
-     * same pass: membership + window check, participant upsert-and-lock, contribution insert,
-     * contribution_count recompute, then grant/revoke.
+     * [carModelId]) contributes to [challengeId]: membership + window check, participant
+     * upsert-and-lock, contribution insert, contribution_count recompute. Does **not** grant or
+     * revoke the completion reward — that happens only at finalization
+     * ([finalizeParticipants], plan §9-C7), once the challenge has ended.
      *
      * This is the one method in the codebase where a single transaction spans multiple logical
      * operations — every other DAO method here is one independent statement per transaction. The
      * reason: challenge_participants is a row shared by every post a user creates during a
-     * challenge, and "contribution recorded -> count updated -> reward reconciled" must be
-     * atomic and serialized per (challenge, user), or two concurrent posts from the same user
-     * could both observe count-1 and both grant the reward. Callers should wrap this call with
+     * challenge, and "contribution recorded -> count updated" must be atomic and serialized per
+     * (challenge, user), or two concurrent posts from the same user could both observe count-1
+     * and cache a stale contribution_count. Callers should wrap this call with
      * [com.revio.server.core.db.retrySerializationConflicts] awareness in mind — it already is,
      * internally.
      */
@@ -101,6 +108,19 @@ interface IChallengeProgressDAO {
      * @return the number of participants actually revoked by this call.
      */
     suspend fun revokeAllGrantedRewards(challengeId: UUID, reason: LedgerReason): Int
+
+    /**
+     * Reconciles every participant of [challengeId] against their final contribution count —
+     * the per-participant engine behind challenge finalization (plan §9-C). One transaction per
+     * participant, same locking pattern as [revokeAllGrantedRewards]: each row is re-read under
+     * FOR UPDATE and its count is recomputed fresh from challenge_contributions (not the cached
+     * contribution_count column) immediately before deciding, so a retried or concurrent call is
+     * idempotent. A participant who reached required_posts but is still NONE is granted; one
+     * who is GRANTED but has since dropped below required_posts (e.g. a late moderation
+     * removal) is revoked, reason [LedgerReason.CONTRIBUTION_REMOVED]. Anyone already in the
+     * matching state (completed-and-GRANTED, or not-completed-and-NONE) is left untouched.
+     */
+    suspend fun finalizeParticipants(challengeId: UUID): FinalizationResult
 
     /**
      * Reverses every contribution [postId] made, one challenge at a time.
@@ -132,6 +152,9 @@ interface IChallengeProgressDAO {
     suspend fun listContributionsForUser(challengeId: UUID, userId: UUID): List<ContributionSummary>
 }
 
+/** Per-participant result of one [ChallengeProgressDAO.finalizeParticipants] pass, tallied into [FinalizationResult]. */
+private enum class FinalizationOutcome { GRANTED, REVOKED, UNCHANGED }
+
 class ChallengeProgressDAO : IChallengeProgressDAO {
 
     override suspend fun evaluatePostContribution(
@@ -147,8 +170,6 @@ class ChallengeProgressDAO : IChallengeProgressDAO {
                     ChallengeTable.targetFamilyId,
                     ChallengeTable.startsAt,
                     ChallengeTable.endsAt,
-                    ChallengeTable.requiredPosts,
-                    ChallengeTable.rewardPoints,
                 )
                 .where { ChallengeTable.id eq challengeId }
                 .singleOrNull()
@@ -170,8 +191,11 @@ class ChallengeProgressDAO : IChallengeProgressDAO {
                 return@transaction ContributionEvaluation(eligible = false)
             }
 
-            // Upsert-then-lock: the serialization point for this (challenge, user). See
-            // ChallengeParticipantTable's KDoc for why this prevents double-granting.
+            // Upsert-then-lock: the serialization point for this (challenge, user), so two
+            // concurrent posts from the same user can't both recount challenge_contributions and
+            // overwrite contribution_count with a stale value. Reward decisions no longer happen
+            // on this path (see finalizeParticipants, plan §9-C7) — this lock now exists purely
+            // to keep the cached counter consistent.
             //
             // Uses upsert (ON CONFLICT DO UPDATE) rather than insertIgnore (ON CONFLICT DO
             // NOTHING) deliberately: under REPEATABLE READ, when two transactions race to create
@@ -187,7 +211,7 @@ class ChallengeProgressDAO : IChallengeProgressDAO {
                 it[ChallengeParticipantTable.challengeId] = challengeId
                 it[ChallengeParticipantTable.userId] = userId
             }
-            val participant = ChallengeParticipantTable
+            ChallengeParticipantTable
                 .selectAll()
                 .where { (ChallengeParticipantTable.challengeId eq challengeId) and (ChallengeParticipantTable.userId eq userId) }
                 .forUpdate()
@@ -215,32 +239,9 @@ class ChallengeProgressDAO : IChallengeProgressDAO {
                 it[ChallengeParticipantTable.updatedAt] = now
             }
 
-            val requiredPosts = challengeRow[ChallengeTable.requiredPosts]
-            val rewardPoints = challengeRow[ChallengeTable.rewardPoints]
-            val currentRewardState = participant[ChallengeParticipantTable.rewardState]
-            val currentAwardEpoch = participant[ChallengeParticipantTable.awardEpoch]
-            val notCompletedBefore = participant[ChallengeParticipantTable.firstCompletedAt] == null
-            val completed = contributionCount >= requiredPosts
-
-            var rewardGranted = false
-            var rewardRevoked = false
-
-            when {
-                completed && currentRewardState == RewardState.NONE -> {
-                    grantReward(challengeId, userId, currentAwardEpoch, rewardPoints, now, setFirstCompletedAt = notCompletedBefore)
-                    rewardGranted = true
-                }
-                !completed && currentRewardState == RewardState.GRANTED -> {
-                    revokeReward(challengeId, userId, currentAwardEpoch, rewardPoints, LedgerReason.CONTRIBUTION_REMOVED)
-                    rewardRevoked = true
-                }
-            }
-
             ContributionEvaluation(
                 eligible = true,
                 contributionCount = contributionCount,
-                rewardGranted = rewardGranted,
-                rewardRevoked = rewardRevoked,
             )
         }
     }
@@ -285,6 +286,66 @@ class ChallengeProgressDAO : IChallengeProgressDAO {
             if (didRevoke) revokedCount++
         }
         return revokedCount
+    }
+
+    override suspend fun finalizeParticipants(challengeId: UUID): FinalizationResult {
+        val userIds = transaction {
+            ChallengeParticipantTable
+                .select(ChallengeParticipantTable.userId)
+                .where { ChallengeParticipantTable.challengeId eq challengeId }
+                .map { it[ChallengeParticipantTable.userId] }
+        }
+
+        var grantedCount = 0
+        var revokedCount = 0
+        for (userId in userIds) {
+            val outcome = retrySerializationConflicts {
+                transaction {
+                    val participant = ChallengeParticipantTable
+                        .selectAll()
+                        .where { (ChallengeParticipantTable.challengeId eq challengeId) and (ChallengeParticipantTable.userId eq userId) }
+                        .forUpdate()
+                        .single()
+
+                    val contributionCount = ChallengeContributionTable
+                        .select(ChallengeContributionTable.id)
+                        .where { (ChallengeContributionTable.challengeId eq challengeId) and (ChallengeContributionTable.userId eq userId) }
+                        .count()
+                        .toInt()
+
+                    val challengeRow = ChallengeTable
+                        .select(ChallengeTable.requiredPosts, ChallengeTable.rewardPoints)
+                        .where { ChallengeTable.id eq challengeId }
+                        .single()
+
+                    val requiredPosts = challengeRow[ChallengeTable.requiredPosts]
+                    val rewardPoints = challengeRow[ChallengeTable.rewardPoints]
+                    val currentRewardState = participant[ChallengeParticipantTable.rewardState]
+                    val currentAwardEpoch = participant[ChallengeParticipantTable.awardEpoch]
+                    val notCompletedBefore = participant[ChallengeParticipantTable.firstCompletedAt] == null
+                    val completed = contributionCount >= requiredPosts
+                    val now = Instant.now().atOffset(ZoneOffset.UTC)
+
+                    when {
+                        completed && currentRewardState == RewardState.NONE -> {
+                            grantReward(challengeId, userId, currentAwardEpoch, rewardPoints, now, setFirstCompletedAt = notCompletedBefore)
+                            FinalizationOutcome.GRANTED
+                        }
+                        !completed && currentRewardState == RewardState.GRANTED -> {
+                            revokeReward(challengeId, userId, currentAwardEpoch, rewardPoints, LedgerReason.CONTRIBUTION_REMOVED)
+                            FinalizationOutcome.REVOKED
+                        }
+                        else -> FinalizationOutcome.UNCHANGED
+                    }
+                }
+            }
+            when (outcome) {
+                FinalizationOutcome.GRANTED -> grantedCount++
+                FinalizationOutcome.REVOKED -> revokedCount++
+                FinalizationOutcome.UNCHANGED -> {}
+            }
+        }
+        return FinalizationResult(grantedCount = grantedCount, revokedCount = revokedCount)
     }
 
     /**

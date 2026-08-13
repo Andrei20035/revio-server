@@ -12,6 +12,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 import org.koin.ktor.ext.inject
+import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.format.DateTimeParseException
@@ -46,6 +47,28 @@ data class RevokeAllRequest(
 @Serializable
 data class RevokeResultDTO(val revokedCount: Int)
 
+@Serializable
+data class FinalizationResultDTO(val grantedCount: Int, val revokedCount: Int)
+
+private fun FinalizationResult.toDTO() = FinalizationResultDTO(grantedCount = grantedCount, revokedCount = revokedCount)
+
+@Serializable
+data class FinalizeDueResultDTO(
+    val finalizedChallenges: Int,
+    val grantedRewards: Int,
+    val revokedRewards: Int,
+)
+
+/** One entry of [FinalizationHealthDTO.stuckChallenges] — plan §9-K3. */
+@Serializable
+data class StuckChallengeDTO(
+    @Serializable(with = UUIDSerializer::class) val id: UUID,
+    @Serializable(with = InstantSerializer::class) val endsAt: Instant,
+)
+
+@Serializable
+data class FinalizationHealthDTO(val stuckChallenges: List<StuckChallengeDTO>)
+
 /** Keyset cursor for GET /admin/challenges — mirrors FeedCursorDTO's shape. */
 @Serializable
 data class ChallengeListCursorDTO(
@@ -77,6 +100,8 @@ data class ChallengeAdminDTO(
     @Serializable(with = InstantSerializer::class) val updatedAt: Instant,
     @Serializable(with = InstantSerializer::class) val publishedAt: Instant?,
     @Serializable(with = InstantSerializer::class) val cancelledAt: Instant?,
+    /** Nullable so an older client (built before this field existed) still deserializes this response. */
+    @Serializable(with = InstantSerializer::class) val finalizedAt: Instant? = null,
 )
 
 private fun Challenge.toAdminDTO() = ChallengeAdminDTO(
@@ -95,6 +120,7 @@ private fun Challenge.toAdminDTO() = ChallengeAdminDTO(
     updatedAt = updatedAt,
     publishedAt = publishedAt,
     cancelledAt = cancelledAt,
+    finalizedAt = finalizedAt,
 )
 
 /**
@@ -113,11 +139,15 @@ private fun parseLocalWindow(startsAtLocal: String, endsAtLocal: String): Pair<L
  * changes for how that claim now reflects users.role.
  *
  * Endpoints intentionally NOT included here — no DAO/service support exists yet, tracked as
- * plan gaps (§9.E): aggregate participant/completion stats on the detail response,
- * GET /admin/challenges/{id}/participants, and POST /admin/challenges/{id}/reconcile.
+ * plan gaps (§9.E): aggregate participant/completion stats on the detail response, and
+ * GET /admin/challenges/{id}/participants.
  */
-fun Route.challengeAdminRoutes() {
+fun Route.challengeAdminRoutes(
+    cronSecretProvider: () -> String? = { System.getenv("CRON_SECRET") },
+) {
     val challengeService: IChallengeService by application.inject()
+    val challengeFinalizationService: IChallengeFinalizationService by application.inject()
+    val challengeDao: IChallengeDAO by application.inject()
 
     route("/admin/challenges") {
         authenticate("admin") {
@@ -322,6 +352,74 @@ fun Route.challengeAdminRoutes() {
                     call.respond(HttpStatusCode.NotFound, mapOf("error" to "Challenge not found"))
                 }
             }
+
+            // Manual/debug finalize — the same engine the cron sweep and the lazy catch-up probe
+            // use (plan §9-C). Idempotent: finalizing an already-finalized challenge, or one that
+            // isn't due yet (still DRAFT/CANCELLED/active), is a harmless no-op reported as a
+            // zero-count 200 — only a nonexistent challenge id is an error.
+            post("/{id}/finalize") {
+                val id = call.parameters["id"].toUuidOrNull()
+                    ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid id"))
+
+                challengeService.findById(id)
+                    ?: return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "Challenge not found"))
+
+                val result = challengeFinalizationService.finalize(id) ?: FinalizationResult(grantedCount = 0, revokedCount = 0)
+                call.respond(HttpStatusCode.OK, result.toDTO())
+            }
+        }
+
+        // Dedicated endpoint for the external cron sweep (plan §9-C6) — the authoritative trigger
+        // for finalization, alongside the manual /{id}/finalize above and the later lazy catch-up
+        // probe. Gated by a cron secret header, not the "admin" JWT realm: the caller has no user
+        // session. Fail-closed on an unset/blank CRON_SECRET — same pattern as
+        // AdminLeaderboardRoutes.kt's /snapshot/today.
+        post("/finalize-due") {
+            val secret = call.request.headers["X-Cron-Secret"]
+            val expectedSecret = cronSecretProvider()
+            if (expectedSecret.isNullOrBlank() || secret != expectedSecret) {
+                call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing cron secret"))
+                return@post
+            }
+
+            val now = Instant.now()
+            var finalizedChallenges = 0
+            var grantedRewards = 0
+            var revokedRewards = 0
+            for (challenge in challengeDao.findDueForFinalization(now, FINALIZE_DUE_LIMIT)) {
+                val result = challengeFinalizationService.finalize(challenge.id, now) ?: continue
+                finalizedChallenges++
+                grantedRewards += result.grantedCount
+                revokedRewards += result.revokedCount
+            }
+
+            call.respond(HttpStatusCode.OK, FinalizeDueResultDTO(finalizedChallenges, grantedRewards, revokedRewards))
+        }
+
+        // Alerting probe for plan §9-K3: a challenge whose window ended more than
+        // STUCK_THRESHOLD ago and still isn't finalized means the finalize-due cron (or the lazy
+        // catch-up probe) isn't running for it. Same X-Cron-Secret gate as /finalize-due — the
+        // caller is an external monitor, not an admin session. Responds 503 (rather than 200 with
+        // a count) specifically so a plain `curl -f` in a scheduled workflow fails loudly and the
+        // failed run itself is the alert — see docs/challenge-finalization.md.
+        get("/finalization-health") {
+            val secret = call.request.headers["X-Cron-Secret"]
+            val expectedSecret = cronSecretProvider()
+            if (expectedSecret.isNullOrBlank() || secret != expectedSecret) {
+                call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing cron secret"))
+                return@get
+            }
+
+            val now = Instant.now()
+            val stuck = challengeDao.findDueForFinalization(now, FINALIZE_DUE_LIMIT)
+                .filter { it.endsAt.isBefore(now.minus(STUCK_THRESHOLD)) }
+                .map { StuckChallengeDTO(id = it.id, endsAt = it.endsAt) }
+
+            val status = if (stuck.isEmpty()) HttpStatusCode.OK else HttpStatusCode.ServiceUnavailable
+            call.respond(status, FinalizationHealthDTO(stuck))
         }
     }
 }
+
+private const val FINALIZE_DUE_LIMIT = 100
+private val STUCK_THRESHOLD: Duration = Duration.ofHours(6)

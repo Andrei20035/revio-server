@@ -9,7 +9,13 @@ import com.revio.server.features.car_family.CarFamilyAdminDTO
 import com.revio.server.features.car_family.CreateCarFamilyRequest
 import com.revio.server.features.challenge.ChallengeAdminDTO
 import com.revio.server.features.challenge.ChallengeAdminPageDTO
+import com.revio.server.features.challenge.ChallengeContributionTable
+import com.revio.server.features.challenge.ChallengeParticipantTable
 import com.revio.server.features.challenge.CreateChallengeAdminRequest
+import com.revio.server.features.challenge.FinalizationHealthDTO
+import com.revio.server.features.challenge.FinalizationResultDTO
+import com.revio.server.features.challenge.FinalizeDueResultDTO
+import com.revio.server.features.challenge.RewardState
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -26,6 +32,8 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
+import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -35,12 +43,16 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import testutils.ChallengeTestSeed
 import testutils.CommentTestSeed
 import testutils.TestDatabaseFactory
 import testutils.TestEnv
 import testutils.setTestEnv
 import testutils.stopKoinSafely
 import testutils.testChallengeAdminModule
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneOffset
 
 /**
  * HTTP contract of GET /api/admin/challenges (list, keyset pagination, effective-status filter —
@@ -75,6 +87,15 @@ class ChallengeAdminRoutesTest {
 
     private fun adminTest(block: suspend ApplicationTestBuilder.(HttpClient, String) -> Unit) = testApplication {
         application { testChallengeAdminModule() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        block(client, adminToken())
+    }
+
+    private val validCronSecret = "test-cron-secret"
+
+    /** Like [adminTest], but wires [cronSecret] (or leaves it unset) for POST .../finalize-due. */
+    private fun cronTest(cronSecret: String?, block: suspend ApplicationTestBuilder.(HttpClient, String) -> Unit) = testApplication {
+        application { testChallengeAdminModule(cronSecret) }
         val client = createClient { install(ContentNegotiation) { json(json) } }
         block(client, adminToken())
     }
@@ -523,6 +544,213 @@ class ChallengeAdminRoutesTest {
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
 
+    // ---------- POST /admin/challenges/{id}/finalize ----------
+
+    @Test
+    fun `POST finalize returns 404 for an unknown id`() = adminTest { client, token ->
+        val response = client.post("/api/admin/challenges/${java.util.UUID.randomUUID()}/finalize") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `POST finalize on a challenge that hasn't ended yet is a no-op reporting zero counts`() = adminTest { client, token ->
+        val family = client.createFamily(token)
+        val startsAtLocal = java.time.LocalDateTime.now().minusHours(1).withNano(0).toString()
+        val endsAtLocal = java.time.LocalDateTime.now().plusDays(2).withNano(0).toString()
+        val created = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = startsAtLocal, endsAtLocal = endsAtLocal))
+        client.post("/api/admin/challenges/${created.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val response = client.post("/api/admin/challenges/${created.id}/finalize") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val result = response.body<FinalizationResultDTO>()
+        assertEquals(FinalizationResultDTO(grantedCount = 0, revokedCount = 0), result)
+        val reloaded = client.get("/api/admin/challenges/${created.id}") { header(HttpHeaders.Authorization, "Bearer $token") }
+            .body<ChallengeAdminDTO>()
+        assertEquals("SCHEDULED", reloaded.status, "finalize on an active challenge must not touch its status")
+    }
+
+    @Test
+    fun `POST finalize on a due challenge is idempotent - a repeated call still returns 200 with zero counts`() = adminTest { client, token ->
+        val family = client.createFamily(token)
+        // Already-ended window, so the challenge is SCHEDULED-and-due for finalization.
+        val created = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = "2020-01-01T09:00:00", endsAtLocal = "2020-01-02T09:00:00"))
+        client.post("/api/admin/challenges/${created.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val first = client.post("/api/admin/challenges/${created.id}/finalize") { header(HttpHeaders.Authorization, "Bearer $token") }
+        assertEquals(HttpStatusCode.OK, first.status)
+        assertEquals(FinalizationResultDTO(grantedCount = 0, revokedCount = 0), first.body<FinalizationResultDTO>())
+
+        val second = client.post("/api/admin/challenges/${created.id}/finalize") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, second.status)
+        assertEquals(FinalizationResultDTO(grantedCount = 0, revokedCount = 0), second.body<FinalizationResultDTO>())
+    }
+
+    @Test
+    fun `GET admin challenges id has a null finalizedAt for a published, not-yet-ended challenge`() = adminTest { client, token ->
+        val family = client.createFamily(token)
+        val startsAtLocal = java.time.LocalDateTime.now().minusHours(1).withNano(0).toString()
+        val endsAtLocal = java.time.LocalDateTime.now().plusDays(2).withNano(0).toString()
+        val created = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = startsAtLocal, endsAtLocal = endsAtLocal))
+        client.post("/api/admin/challenges/${created.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val reloaded = client.get("/api/admin/challenges/${created.id}") { header(HttpHeaders.Authorization, "Bearer $token") }
+            .body<ChallengeAdminDTO>()
+
+        assertNull(reloaded.finalizedAt)
+    }
+
+    @Test
+    fun `GET admin challenges id has a non-null finalizedAt after finalize reconciles a due challenge`() = adminTest { client, token ->
+        val family = client.createFamily(token)
+        // Already-ended window, so the challenge is SCHEDULED-and-due for finalization.
+        val created = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = "2020-01-01T09:00:00", endsAtLocal = "2020-01-02T09:00:00"))
+        client.post("/api/admin/challenges/${created.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+        client.post("/api/admin/challenges/${created.id}/finalize") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val reloaded = client.get("/api/admin/challenges/${created.id}") { header(HttpHeaders.Authorization, "Bearer $token") }
+            .body<ChallengeAdminDTO>()
+
+        assertNotNull(reloaded.finalizedAt)
+    }
+
+    // ---------- POST /admin/challenges/finalize-due (cron) ----------
+
+    /** Inserts a participant row directly, bypassing evaluatePostContribution's own grant/revoke. */
+    private fun seedParticipant(challengeId: java.util.UUID, userId: java.util.UUID, rewardState: RewardState, contributionCountCache: Int) = transaction {
+        ChallengeParticipantTable.insert {
+            it[ChallengeParticipantTable.challengeId] = challengeId
+            it[ChallengeParticipantTable.userId] = userId
+            it[ChallengeParticipantTable.contributionCount] = contributionCountCache
+            it[ChallengeParticipantTable.rewardState] = rewardState
+        }
+    }
+
+    /** Inserts one real contribution row (with a real backing post) directly. */
+    private fun seedContribution(challengeId: java.util.UUID, userId: java.util.UUID, modelId: java.util.UUID) = transaction {
+        val postId = ChallengeTestSeed.seedCameraPost(userId, modelId)
+        ChallengeContributionTable.insert {
+            it[ChallengeContributionTable.challengeId] = challengeId
+            it[ChallengeContributionTable.userId] = userId
+            it[ChallengeContributionTable.postId] = postId
+            it[ChallengeContributionTable.carModelId] = modelId
+            it[ChallengeContributionTable.postCreatedAt] = Instant.now().atOffset(ZoneOffset.UTC)
+        }
+    }
+
+    @Test
+    fun `POST finalize-due without a secret returns 401`() = cronTest(validCronSecret) { client, _ ->
+        val response = client.post("/api/admin/challenges/finalize-due")
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `POST finalize-due with the wrong secret returns 401`() = cronTest(validCronSecret) { client, _ ->
+        val response = client.post("/api/admin/challenges/finalize-due") { header("X-Cron-Secret", "wrong-secret") }
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `POST finalize-due returns 401 when CRON_SECRET is not configured, even with a secret header sent`() = cronTest(null) { client, _ ->
+        val response = client.post("/api/admin/challenges/finalize-due") { header("X-Cron-Secret", "anything") }
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `POST finalize-due with the correct secret finalizes every due challenge and reports correct counters`() = cronTest(validCronSecret) { client, token ->
+        val family = client.createFamily(token)
+        val modelId = ChallengeTestSeed.seedModel("volkswagen", "golf r", family.id)
+        val user = CommentTestSeed.seedUser(username = "spotter")
+
+        // A: due, one participant who reached the threshold (requiredPosts=5) but is still NONE -> should grant.
+        val toGrant = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = "2020-01-01T09:00:00", endsAtLocal = "2020-01-02T09:00:00"))
+        client.post("/api/admin/challenges/${toGrant.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+        repeat(5) { seedContribution(toGrant.id, user.userId, modelId) }
+        seedParticipant(toGrant.id, user.userId, RewardState.NONE, contributionCountCache = 5)
+
+        // B: due, one participant GRANTED but with zero real contributions -> should revoke.
+        val toRevoke = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = "2020-02-01T09:00:00", endsAtLocal = "2020-02-02T09:00:00"))
+        client.post("/api/admin/challenges/${toRevoke.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+        seedParticipant(toRevoke.id, user.userId, RewardState.GRANTED, contributionCountCache = 1)
+
+        // C: due, no participants -> counted as finalized, contributes zero to both counters.
+        val untouched = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = "2020-03-01T09:00:00", endsAtLocal = "2020-03-02T09:00:00"))
+        client.post("/api/admin/challenges/${untouched.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        // D: not due (still active) -> must not be counted at all.
+        val active = client.createChallenge(
+            token,
+            challengeRequest(
+                familyId = family.id,
+                startsAtLocal = LocalDateTime.now().minusHours(1).withNano(0).toString(),
+                endsAtLocal = LocalDateTime.now().plusDays(2).withNano(0).toString(),
+            ),
+        )
+        client.post("/api/admin/challenges/${active.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val response = client.post("/api/admin/challenges/finalize-due") { header("X-Cron-Secret", validCronSecret) }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(
+            FinalizeDueResultDTO(finalizedChallenges = 3, grantedRewards = 1, revokedRewards = 1),
+            response.body<FinalizeDueResultDTO>(),
+        )
+    }
+
+    // ---------- GET /admin/challenges/finalization-health (plan §9-K3 alerting probe) ----------
+
+    @Test
+    fun `GET finalization-health without a secret returns 401`() = cronTest(validCronSecret) { client, _ ->
+        val response = client.get("/api/admin/challenges/finalization-health")
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `GET finalization-health with the wrong secret returns 401`() = cronTest(validCronSecret) { client, _ ->
+        val response = client.get("/api/admin/challenges/finalization-health") { header("X-Cron-Secret", "wrong-secret") }
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `GET finalization-health returns 200 with no stuck challenges when nothing is overdue past the threshold`() =
+        cronTest(validCronSecret) { client, token ->
+            val family = client.createFamily(token)
+
+            // Ended 2h ago - due for finalize-due, but well under the 6h stuck threshold.
+            val recentlyEnded = client.createChallenge(
+                token,
+                challengeRequest(
+                    familyId = family.id,
+                    startsAtLocal = LocalDateTime.now().minusDays(1).withNano(0).toString(),
+                    endsAtLocal = LocalDateTime.now().minusHours(2).withNano(0).toString(),
+                ),
+            )
+            client.post("/api/admin/challenges/${recentlyEnded.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+            val response = client.get("/api/admin/challenges/finalization-health") { header("X-Cron-Secret", validCronSecret) }
+
+            assertEquals(HttpStatusCode.OK, response.status)
+            assertTrue(response.body<FinalizationHealthDTO>().stuckChallenges.isEmpty())
+        }
+
+    @Test
+    fun `GET finalization-health returns 503 listing challenges overdue past the 6h threshold`() =
+        cronTest(validCronSecret) { client, token ->
+            val family = client.createFamily(token)
+            val overdue = client.createChallenge(token, challengeRequest(familyId = family.id, startsAtLocal = "2020-01-01T09:00:00", endsAtLocal = "2020-01-02T09:00:00"))
+            client.post("/api/admin/challenges/${overdue.id}/publish") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+            val response = client.get("/api/admin/challenges/finalization-health") { header("X-Cron-Secret", validCronSecret) }
+
+            assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+            val stuck = response.body<FinalizationHealthDTO>().stuckChallenges
+            assertEquals(1, stuck.size)
+            assertEquals(overdue.id, stuck.first().id)
+        }
+
     // ---------- Authorization ----------
 
     @Test
@@ -542,6 +770,29 @@ class ChallengeAdminRoutesTest {
         val userToken = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
 
         val response = client.get("/api/admin/challenges") { header(HttpHeaders.Authorization, "Bearer $userToken") }
+
+        assertEquals(HttpStatusCode.Forbidden, response.status)
+    }
+
+    @Test
+    fun `POST finalize rejects a non-admin token with 403`() = testApplication {
+        application { testChallengeAdminModule() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        val seeded = CommentTestSeed.seedUser(username = "plainuser2")
+        val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
+            credentialId = seeded.authId,
+            scope = SessionScope.FULL,
+            userId = seeded.userId,
+            deviceId = null,
+            deviceName = null,
+            userAgent = null,
+            ip = null,
+        )
+        val userToken = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
+
+        val response = client.post("/api/admin/challenges/${java.util.UUID.randomUUID()}/finalize") {
+            header(HttpHeaders.Authorization, "Bearer $userToken")
+        }
 
         assertEquals(HttpStatusCode.Forbidden, response.status)
     }

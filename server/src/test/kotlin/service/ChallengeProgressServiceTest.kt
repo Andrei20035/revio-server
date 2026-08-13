@@ -57,6 +57,7 @@ class ChallengeProgressServiceTest {
         updatedAt = Instant.now(),
         publishedAt = Instant.now(),
         cancelledAt = null,
+        finalizedAt = null,
     )
 
     private fun challengeWith(
@@ -80,6 +81,7 @@ class ChallengeProgressServiceTest {
         updatedAt = Instant.now(),
         publishedAt = Instant.now(),
         cancelledAt = null,
+        finalizedAt = null,
     )
 
     // ---------- evaluatePostForActiveChallenge ----------

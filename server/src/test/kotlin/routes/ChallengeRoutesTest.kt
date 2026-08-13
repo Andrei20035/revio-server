@@ -7,7 +7,12 @@ import com.revio.server.features.auth.RefreshTokenGenerator
 import com.revio.server.features.auth.session.AuthSessionDAO
 import com.revio.server.features.auth.session.SessionScope
 import com.revio.server.features.auth.session.SessionService
+import com.revio.server.features.challenge.ChallengeParticipantTable
 import com.revio.server.features.challenge.ChallengeStatus
+import com.revio.server.features.challenge.ChallengeTable
+import com.revio.server.features.challenge.FinalizationResult
+import com.revio.server.features.challenge.IChallengeFinalizationService
+import com.revio.server.features.challenge.RewardState
 import com.revio.server.features.challenge.dto.ChallengeProgressDetailDTO
 import com.revio.server.features.challenge.dto.CurrentChallengeDTO
 import io.ktor.client.HttpClient
@@ -22,8 +27,13 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.Serializable
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.select
+import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -171,6 +181,44 @@ class ChallengeRoutesTest {
     }
 
     @Test
+    fun `GET challenges current returns effectiveStatus SCHEDULED for a challenge that hasn't started yet`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.plusSeconds(3600), endsAt = now.plusSeconds(7200),
+            status = ChallengeStatus.SCHEDULED, title = "Next weekend",
+        )
+
+        val response = client.get("/api/challenges/current") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<CurrentChallengeDTO>()
+        assertEquals("SCHEDULED", body.effectiveStatus)
+    }
+
+    @Test
+    fun `GET challenges current returns effectiveStatus ACTIVE for a challenge inside its window`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600),
+            status = ChallengeStatus.SCHEDULED, title = "Weekend Golf Hunt",
+        )
+
+        val response = client.get("/api/challenges/current") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<CurrentChallengeDTO>()
+        assertEquals("ACTIVE", body.effectiveStatus)
+    }
+
+    @Test
+    fun `GET challenges current returns null effectiveStatus when nothing is scheduled`() = userTest { client, token, _ ->
+        val response = client.get("/api/challenges/current") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<CurrentChallengeDTO>()
+        assertNull(body.effectiveStatus)
+    }
+
+    @Test
     fun `GET challenges current without a token is unauthorized`() = testApplication {
         application { testChallengeModule() }
         val client = createClient { install(ContentNegotiation) { json(json) } }
@@ -178,6 +226,83 @@ class ChallengeRoutesTest {
         val response = client.get("/api/challenges/current")
 
         assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    // ---------- lazy catch-up finalization (plan §9-C8) ----------
+
+    /** Polls until [challengeId] has finalized_at set, or [timeoutMillis] elapses. */
+    private suspend fun awaitFinalized(challengeId: UUID, timeoutMillis: Long = 3000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        while (System.currentTimeMillis() < deadline) {
+            val finalizedAt = transaction {
+                ChallengeTable.select(ChallengeTable.finalizedAt).where { ChallengeTable.id eq challengeId }.single()[ChallengeTable.finalizedAt]
+            }
+            if (finalizedAt != null) return true
+            delay(50)
+        }
+        return false
+    }
+
+    @Test
+    fun `GET challenges current lazily finalizes a due challenge in the background`() = userTest { client, token, userId ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val modelId = ChallengeTestSeed.seedModel("volkswagen", "golf r", familyId)
+        val windowEnd = Instant.now().minusSeconds(3600)
+        val windowStart = windowEnd.minusSeconds(3600)
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = windowStart, endsAt = windowEnd, requiredPosts = 1, rewardPoints = 300,
+        )
+        val postId = ChallengeTestSeed.seedCameraPost(userId, modelId)
+        com.revio.server.features.challenge.ChallengeProgressDAO()
+            .evaluatePostContribution(challengeId, userId, postId, modelId, windowStart.plusSeconds(60))
+
+        val response = client.get("/api/challenges/current") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(awaitFinalized(challengeId), "the due challenge must be finalized shortly after the /current request")
+        val rewardState = transaction {
+            ChallengeParticipantTable.select(ChallengeParticipantTable.rewardState)
+                .where { (ChallengeParticipantTable.challengeId eq challengeId) and (ChallengeParticipantTable.userId eq userId) }
+                .single()[ChallengeParticipantTable.rewardState]
+        }
+        assertEquals(RewardState.GRANTED, rewardState)
+    }
+
+    private class ThrowingChallengeFinalizationService : IChallengeFinalizationService {
+        override suspend fun finalize(challengeId: UUID, now: Instant): FinalizationResult? =
+            throw RuntimeException("simulated finalization failure")
+    }
+
+    private fun Application.withThrowingFinalization() {
+        testChallengeModule()
+        getKoin().loadModules(listOf(module { single<IChallengeFinalizationService> { ThrowingChallengeFinalizationService() } }))
+    }
+
+    @Test
+    fun `GET challenges current responds normally even when the background finalization throws`() = testApplication {
+        application { withThrowingFinalization() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        val seeded = CommentTestSeed.seedUser()
+        val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
+            credentialId = seeded.authId,
+            scope = SessionScope.FULL,
+            userId = seeded.userId,
+            deviceId = null,
+            deviceName = null,
+            userAgent = null,
+            ip = null,
+        )
+        val token = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
+
+        val familyId = ChallengeTestSeed.seedFamily()
+        val windowEnd = Instant.now().minusSeconds(3600)
+        ChallengeTestSeed.seedChallenge(familyId = familyId, startsAt = windowEnd.minusSeconds(3600), endsAt = windowEnd, requiredPosts = 1)
+
+        val response = client.get("/api/challenges/current") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.body<CurrentChallengeDTO>()
+        assertNull(body.challenge, "an already-ended challenge is never 'current', regardless of the background finalization outcome")
     }
 
     // ---------- GET /challenges/{id}/progress ----------
@@ -279,6 +404,24 @@ class ChallengeRoutesTest {
     }
 
     @Test
+    fun `GET challenges id and id progress both return 404 for a DRAFT challenge`() = userTest { client, token, _ ->
+        // D5: /{id}/progress now uses findPublicById, same as /{id} — a DRAFT (never published)
+        // must 404 on both, not 200 on one and 404 on the other.
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        val draftId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.plusSeconds(3600), endsAt = now.plusSeconds(7200),
+            status = ChallengeStatus.DRAFT,
+        )
+
+        val detailResponse = client.get("/api/challenges/$draftId") { header(HttpHeaders.Authorization, "Bearer $token") }
+        val progressResponse = client.get("/api/challenges/$draftId/progress") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.NotFound, detailResponse.status)
+        assertEquals(HttpStatusCode.NotFound, progressResponse.status)
+    }
+
+    @Test
     fun `GET challenges id progress without a token is unauthorized`() = testApplication {
         application { testChallengeModule() }
         val client = createClient { install(ContentNegotiation) { json(json) } }
@@ -286,6 +429,132 @@ class ChallengeRoutesTest {
         val response = client.get("/api/challenges/${UUID.randomUUID()}/progress")
 
         assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    // ---------- participantState wiring (plan §7.2, D2) ----------
+
+    private fun finalizationService() = com.revio.server.features.challenge.ChallengeFinalizationService(
+        com.revio.server.features.challenge.ChallengeDAO(),
+        com.revio.server.features.challenge.ChallengeProgressDAO(),
+    )
+
+    @Test
+    fun `GET challenges current returns NOT_STARTED participantState for an upcoming challenge`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.plusSeconds(3600), endsAt = now.plusSeconds(7200),
+            status = ChallengeStatus.SCHEDULED, title = "Next weekend",
+        )
+
+        val response = client.get("/api/challenges/current") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<CurrentChallengeDTO>()
+        assertEquals("NOT_STARTED", body.progress?.participantState)
+    }
+
+    @Test
+    fun `GET challenges current returns IN_PROGRESS participantState for an active challenge below threshold`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600),
+            status = ChallengeStatus.SCHEDULED, requiredPosts = 5,
+        )
+
+        val response = client.get("/api/challenges/current") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<CurrentChallengeDTO>()
+        assertEquals("IN_PROGRESS", body.progress?.participantState)
+    }
+
+    @Test
+    fun `GET challenges id progress returns COMPLETED_PENDING participantState once the threshold is reached before finalization`() = userTest { client, token, userId ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val modelId = ChallengeTestSeed.seedModel("volkswagen", "golf r", familyId)
+        val now = Instant.now()
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600), requiredPosts = 1,
+        )
+        val postId = ChallengeTestSeed.seedCameraPost(userId, modelId)
+        com.revio.server.features.challenge.ChallengeProgressDAO().evaluatePostContribution(challengeId, userId, postId, modelId, now)
+
+        val response = client.get("/api/challenges/$challengeId/progress") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<ChallengeProgressDetailDTO>()
+        assertEquals("COMPLETED_PENDING", body.progress.participantState)
+    }
+
+    @Test
+    fun `GET challenges id progress returns REWARDED participantState after finalization grants the reward`() = userTest { client, token, userId ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val modelId = ChallengeTestSeed.seedModel("volkswagen", "golf r", familyId)
+        val windowEnd = Instant.now().minusSeconds(3600)
+        val windowStart = windowEnd.minusSeconds(3600)
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = windowStart, endsAt = windowEnd, requiredPosts = 1,
+        )
+        val postId = ChallengeTestSeed.seedCameraPost(userId, modelId)
+        com.revio.server.features.challenge.ChallengeProgressDAO()
+            .evaluatePostContribution(challengeId, userId, postId, modelId, windowStart.plusSeconds(60))
+        finalizationService().finalize(challengeId, Instant.now())
+
+        val response = client.get("/api/challenges/$challengeId/progress") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<ChallengeProgressDetailDTO>()
+        assertEquals("REWARDED", body.progress.participantState)
+    }
+
+    @Test
+    fun `GET challenges id progress returns NOT_COMPLETED participantState after finalization when the threshold was never reached`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val windowEnd = Instant.now().minusSeconds(3600)
+        val windowStart = windowEnd.minusSeconds(3600)
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = windowStart, endsAt = windowEnd, requiredPosts = 5,
+        )
+        finalizationService().finalize(challengeId, Instant.now())
+
+        val response = client.get("/api/challenges/$challengeId/progress") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<ChallengeProgressDetailDTO>()
+        assertEquals("NOT_COMPLETED", body.progress.participantState)
+    }
+
+    @Test
+    fun `GET challenges id progress returns CANCELLED participantState for a cancelled challenge`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600),
+            status = ChallengeStatus.CANCELLED,
+        )
+
+        val response = client.get("/api/challenges/$challengeId/progress") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        val body = response.body<ChallengeProgressDetailDTO>()
+        assertEquals("CANCELLED", body.progress.participantState)
+    }
+
+    @Test
+    fun `GET challenges id progress response deserializes with a client that doesn't know participantState`() = userTest { client, token, userId ->
+        // Backward compatibility for D2: participantState is new and additive — a client built
+        // before it existed (LegacyChallengeProgressDTO, below) must still decode this response.
+        val familyId = ChallengeTestSeed.seedFamily()
+        val modelId = ChallengeTestSeed.seedModel("volkswagen", "golf r", familyId)
+        val now = Instant.now()
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600), requiredPosts = 5,
+        )
+        val postId = ChallengeTestSeed.seedCameraPost(userId, modelId)
+        com.revio.server.features.challenge.ChallengeProgressDAO().evaluatePostContribution(challengeId, userId, postId, modelId, now)
+
+        val response = client.get("/api/challenges/$challengeId/progress") { header(HttpHeaders.Authorization, "Bearer $token") }
+        val raw = response.bodyAsText()
+
+        val legacy = json.decodeFromString(LegacyChallengeProgressDetailDTO.serializer(), raw)
+        assertEquals(1, legacy.progress.contributionCount)
+        assertEquals("NONE", legacy.progress.rewardState)
     }
 }
 
