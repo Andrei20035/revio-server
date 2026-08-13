@@ -775,6 +775,59 @@ class ChallengeAdminRoutesTest {
     }
 
     @Test
+    fun `POST admin challenges rejects a non-admin token with 403`() = testApplication {
+        application { testChallengeAdminModule() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        val seeded = CommentTestSeed.seedUser(username = "plainuser3")
+        val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
+            credentialId = seeded.authId,
+            scope = SessionScope.FULL,
+            userId = seeded.userId,
+            deviceId = null,
+            deviceName = null,
+            userAgent = null,
+            ip = null,
+        )
+        val userToken = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
+
+        val response = client.post("/api/admin/challenges") {
+            header(HttpHeaders.Authorization, "Bearer $userToken")
+            contentType(ContentType.Application.Json)
+            setBody(
+                json.encodeToString(
+                    CreateChallengeAdminRequest.serializer(),
+                    challengeRequest(familyId = java.util.UUID.randomUUID()),
+                ),
+            )
+        }
+
+        assertEquals(HttpStatusCode.Forbidden, response.status)
+    }
+
+    @Test
+    fun `POST publish rejects a non-admin token with 403`() = testApplication {
+        application { testChallengeAdminModule() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        val seeded = CommentTestSeed.seedUser(username = "plainuser4")
+        val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
+            credentialId = seeded.authId,
+            scope = SessionScope.FULL,
+            userId = seeded.userId,
+            deviceId = null,
+            deviceName = null,
+            userAgent = null,
+            ip = null,
+        )
+        val userToken = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
+
+        val response = client.post("/api/admin/challenges/${java.util.UUID.randomUUID()}/publish") {
+            header(HttpHeaders.Authorization, "Bearer $userToken")
+        }
+
+        assertEquals(HttpStatusCode.Forbidden, response.status)
+    }
+
+    @Test
     fun `POST finalize rejects a non-admin token with 403`() = testApplication {
         application { testChallengeAdminModule() }
         val client = createClient { install(ContentNegotiation) { json(json) } }

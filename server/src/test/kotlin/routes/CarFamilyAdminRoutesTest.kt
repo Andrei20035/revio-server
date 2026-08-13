@@ -199,6 +199,49 @@ class CarFamilyAdminRoutesTest {
         assertEquals(HttpStatusCode.BadRequest, response.status)
     }
 
+    // ---------- GET /admin/car-families ----------
+
+    @Test
+    fun `GET admin car-families returns an empty list when none exist`() = adminTest { client, token ->
+        val response = client.get("/api/admin/car-families") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(emptyList<CarFamilyAdminDTO>(), response.body<List<CarFamilyAdminDTO>>())
+    }
+
+    @Test
+    fun `GET admin car-families returns every created family`() = adminTest { client, token ->
+        val golf = client.createFamily(token, brand = "volkswagen", name = "Golf")
+        val corolla = client.createFamily(token, brand = "toyota", name = "Corolla")
+
+        val response = client.get("/api/admin/car-families") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val families = response.body<List<CarFamilyAdminDTO>>()
+        assertEquals(setOf(golf.id, corolla.id), families.map { it.id }.toSet())
+    }
+
+    @Test
+    fun `GET admin car-families rejects a non-admin token with 403`() = testApplication {
+        application { testChallengeAdminModule() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        val seeded = CommentTestSeed.seedUser(username = "plainuser3")
+        val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
+            credentialId = seeded.authId,
+            scope = SessionScope.FULL,
+            userId = seeded.userId,
+            deviceId = null,
+            deviceName = null,
+            userAgent = null,
+            ip = null,
+        )
+        val userToken = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
+
+        val response = client.get("/api/admin/car-families") { header(HttpHeaders.Authorization, "Bearer $userToken") }
+
+        assertEquals(HttpStatusCode.Forbidden, response.status)
+    }
+
     // ---------- GET /admin/car-families/{id}/models ----------
 
     private suspend fun HttpClient.getModels(token: String, familyId: UUID) =
