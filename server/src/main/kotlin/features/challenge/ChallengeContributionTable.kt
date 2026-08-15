@@ -11,8 +11,11 @@ import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
 /**
  * Source of truth for challenge progress: one row per (challenge, post). The UNIQUE(challenge_id,
  * post_id) constraint is what prevents the same post from ever being counted twice, including
- * under concurrent evaluation. car_model_id is copied at contribution time so the audit trail
- * survives a later model edit on the post (see PostService.updatePostAsAuthor).
+ * under concurrent evaluation. car_model_id is copied at contribution time for the audit trail
+ * (see [ContributionSummary]) — PostService.updatePostAsAuthor no longer allows a later model
+ * edit on a contributing post at all, so this snapshot and the post's own car_model_id will
+ * always agree in practice, but the copy is kept as the read path's own source of truth rather
+ * than joining back to posts.
  */
 object ChallengeContributionTable : UUIDTable("challenge_contributions") {
     val challengeId = uuid("challenge_id").references(ChallengeTable.id, onDelete = ReferenceOption.CASCADE)

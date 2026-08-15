@@ -806,6 +806,46 @@ class ChallengeProgressDaoTest {
         assertEquals(1, ledgerRows(f.challengeId, f.userId).size)
     }
 
+    // ---------- J. hasContributions ----------
+
+    @Test
+    fun `hasContributions is false for a post that never contributed`() = runBlocking {
+        val f = fixture()
+        val unrelatedPost = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
+
+        assertFalse(dao.hasContributions(unrelatedPost))
+    }
+
+    @Test
+    fun `hasContributions is true once a post has a contribution row`() = runBlocking {
+        val f = fixture()
+        val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
+        dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+
+        assertTrue(dao.hasContributions(postId))
+    }
+
+    @Test
+    fun `hasContributions stays true after the challenge has been finalized`() = runBlocking {
+        val f = fixture(requiredPosts = 1)
+        val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
+        dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+        dao.finalizeParticipants(f.challengeId)
+
+        assertTrue(dao.hasContributions(postId))
+    }
+
+    @Test
+    fun `hasContributions stays true after the reward was revoked`() = runBlocking {
+        val f = fixture(requiredPosts = 1)
+        val postId = ChallengeTestSeed.seedCameraPost(f.userId, f.modelId)
+        dao.evaluatePostContribution(f.challengeId, f.userId, postId, f.modelId, Instant.now())
+        dao.finalizeParticipants(f.challengeId)
+        dao.revokeAllGrantedRewards(f.challengeId, LedgerReason.ADMIN_REVOKE_ALL)
+
+        assertTrue(dao.hasContributions(postId), "the contribution row itself is untouched by revokeAllGrantedRewards")
+    }
+
     @Test
     fun `re-running finalizeParticipants after a revoke moves spot_score and the ledger only once`() = runBlocking {
         val f = fixture(requiredPosts = 3, rewardPoints = 300)

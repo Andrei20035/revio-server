@@ -150,6 +150,14 @@ interface IChallengeProgressDAO {
 
     /** [userId]'s contributing posts for [challengeId], oldest first. */
     suspend fun listContributionsForUser(challengeId: UUID, userId: UUID): List<ContributionSummary>
+
+    /**
+     * Whether [postId] has ever contributed to any challenge — i.e. has at least one row in
+     * [ChallengeContributionTable], regardless of that challenge's status (active, ended,
+     * finalized, or cancelled). Used to lock a post's car model against edits once it has
+     * contributed, so a later edit can't retroactively falsify an already-recorded contribution.
+     */
+    suspend fun hasContributions(postId: UUID): Boolean
 }
 
 /** Per-participant result of one [ChallengeProgressDAO.finalizeParticipants] pass, tallied into [FinalizationResult]. */
@@ -507,6 +515,14 @@ class ChallengeProgressDAO : IChallengeProgressDAO {
                     rewardState = it[ChallengeParticipantTable.rewardState],
                 )
             }
+    }
+
+    override suspend fun hasContributions(postId: UUID): Boolean = transaction {
+        ChallengeContributionTable
+            .select(ChallengeContributionTable.id)
+            .where { ChallengeContributionTable.postId eq postId }
+            .limit(1)
+            .any()
     }
 
     override suspend fun listContributionsForUser(challengeId: UUID, userId: UUID): List<ContributionSummary> = transaction {

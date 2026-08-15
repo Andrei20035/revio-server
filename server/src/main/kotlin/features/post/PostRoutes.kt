@@ -229,6 +229,14 @@ fun Route.postRoutes() {
                     call.respond(HttpStatusCode.NotFound, mapOf("error" to "Post not found"))
                 } catch (e: PostForbiddenException) {
                     call.respond(HttpStatusCode.Forbidden, mapOf("error" to "You do not have permission to edit this post"))
+                } catch (e: PostVehicleLockedException) {
+                    call.respond(
+                        HttpStatusCode.Conflict,
+                        mapOf(
+                            "error" to "This post's vehicle can no longer be changed because it has contributed to a challenge",
+                            "code" to "CHALLENGE_POST_VEHICLE_LOCKED",
+                        ),
+                    )
                 } catch (e: IllegalArgumentException) {
                     call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "Invalid request")))
                 }

@@ -161,7 +161,10 @@ class PostServiceImpl(
     }
 
     override suspend fun findPostById(postId: UUID, currentUserId: UUID?): PostDTO? =
-        postDao.findById(postId)?.let { enrichPosts(listOf(it), currentUserId).first() }
+        postDao.findById(postId)?.let { post ->
+            enrichPosts(listOf(post), currentUserId).first()
+                .copy(vehicleLocked = challengeProgressService.hasContributions(postId))
+        }
 
     override suspend fun listFeed(
         limit: Int,
@@ -296,6 +299,10 @@ class PostServiceImpl(
 
         validateUpdateRequest(request)
 
+        if (vehicleChanged(post, request) && challengeProgressService.hasContributions(postId)) {
+            throw PostVehicleLockedException(postId)
+        }
+
         val caption = request.caption?.trim()
         postDao.updateById(
             postId = postId,
@@ -308,6 +315,20 @@ class PostServiceImpl(
         val updated = postDao.findById(postId) ?: throw PostNotFoundException(postId)
         return toResponse(updated)
     }
+
+    /**
+     * Whether [request] would actually change [post]'s vehicle — false for a resubmission of the
+     * same selection (which must remain a no-op, since the client always sends the full vehicle
+     * on every PATCH; see [validateUpdateRequest]'s carModelId-XOR-custom requirement).
+     */
+    private fun vehicleChanged(post: Post, request: UpdatePostRequest): Boolean =
+        if (request.carModelId != null) {
+            request.carModelId != post.carModelId
+        } else {
+            val brand = request.customBrand?.trim()
+            val model = request.customModel?.trim()
+            post.carModelId != null || brand != post.brand || model != post.model
+        }
 
     private suspend fun validateUpdateRequest(request: UpdatePostRequest) {
         val caption = request.caption?.trim()
@@ -420,3 +441,6 @@ class PostNotFoundException(val postId: UUID) : RuntimeException("Post $postId n
 
 class PostForbiddenException(postId: UUID, userId: UUID) :
     RuntimeException("User $userId cannot delete post $postId")
+
+class PostVehicleLockedException(val postId: UUID) :
+    RuntimeException("Post $postId's vehicle is locked because it has contributed to a challenge")

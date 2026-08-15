@@ -8,6 +8,7 @@ import com.revio.server.features.auth.session.SessionScope
 import com.revio.server.features.auth.session.SessionService
 import com.revio.server.core.error.AuthErrorCode
 import com.revio.server.core.error.AuthErrorResponse
+import com.revio.server.features.challenge.ChallengeContributionTable
 import com.revio.server.features.post.dto.CreatePostResponse
 import com.revio.server.features.post.dto.FeedResponseDTO
 import com.revio.server.features.post.dto.PostDTO
@@ -33,6 +34,9 @@ import io.ktor.client.request.forms.formData
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.testing.*
 import kotlinx.serialization.json.Json
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertDoesNotThrow
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -42,6 +46,7 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import testutils.ChallengeTestSeed
 import testutils.CommentTestSeed
 import testutils.LikeTestSeed
 import testutils.TestDatabaseFactory
@@ -49,6 +54,8 @@ import testutils.TestEnv
 import testutils.setTestEnv
 import testutils.stopKoinSafely
 import testutils.testPostModule
+import java.time.Instant
+import java.time.ZoneOffset
 import java.util.UUID
 import com.auth0.jwt.JWT
 import com.auth0.jwt.algorithms.Algorithm
@@ -806,6 +813,100 @@ class PostRoutesTest {
         assertEquals("Audi", persisted.brand)
         assertEquals("RS6", persisted.model)
         assertEquals("updated caption", persisted.caption)
+    }
+
+    /** Seeds a challenge + a real contributing post (mirrors ChallengeProgressDaoTest's seedContribution). */
+    private fun seedContributingPost(ownerUserId: UUID): UUID {
+        val familyId = ChallengeTestSeed.seedFamily()
+        val modelId = ChallengeTestSeed.seedModel("volkswagen", "golf r", familyId)
+        val now = Instant.now()
+        val challengeId = ChallengeTestSeed.seedChallenge(familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600))
+        val postId = ChallengeTestSeed.seedCameraPost(ownerUserId, modelId)
+        transaction {
+            ChallengeContributionTable.insert {
+                it[ChallengeContributionTable.challengeId] = challengeId
+                it[ChallengeContributionTable.userId] = ownerUserId
+                it[ChallengeContributionTable.postId] = postId
+                it[ChallengeContributionTable.carModelId] = modelId
+                it[ChallengeContributionTable.postCreatedAt] = now.atOffset(ZoneOffset.UTC)
+            }
+        }
+        return postId
+    }
+
+    @Test
+    fun `PATCH returns 409 with CHALLENGE_POST_VEHICLE_LOCKED when changing the model of a post that contributed to a challenge`() = postTest { client ->
+        val owner = CommentTestSeed.seedUser(username = "owner")
+        val postId = seedContributingPost(owner.userId)
+        val otherModelId = ChallengeTestSeed.seedModel("audi", "rs6")
+        val token = tokenFor(owner.authId, owner.userId, owner.email)
+
+        val response = client.patch("/api/posts/$postId") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody(UpdatePostRequest(carModelId = otherModelId))
+        }
+
+        assertEquals(HttpStatusCode.Conflict, response.status)
+        val body = response.body<Map<String, String>>()
+        assertEquals("CHALLENGE_POST_VEHICLE_LOCKED", body["code"])
+    }
+
+    @Test
+    fun `PATCH returns 200 for a caption-only change when the vehicle is resubmitted identically on a contributing post`() = postTest { client ->
+        val owner = CommentTestSeed.seedUser(username = "owner")
+        val postId = seedContributingPost(owner.userId)
+        val token = tokenFor(owner.authId, owner.userId, owner.email)
+
+        val getResponse = client.get("/api/posts/$postId") { bearerAuth(token) }
+        val currentCarModelId = getResponse.body<PostDTO>().carModelId
+
+        val response = client.patch("/api/posts/$postId") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody(UpdatePostRequest(carModelId = currentCarModelId, caption = "still the same car"))
+        }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val updated = response.body<PostDTO>()
+        assertEquals("still the same car", updated.caption)
+    }
+
+    @Test
+    fun `GET post detail returns vehicleLocked true for a post that contributed to a challenge`() = postTest { client ->
+        val owner = CommentTestSeed.seedUser(username = "owner")
+        val postId = seedContributingPost(owner.userId)
+
+        val response = client.get("/api/posts/$postId")
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.body<PostDTO>().vehicleLocked)
+    }
+
+    @Test
+    fun `GET post detail returns vehicleLocked false for a post without any contribution`() = postTest { client ->
+        val owner = CommentTestSeed.seedUser(username = "owner")
+        val post = CommentTestSeed.seedPost(owner.userId)
+
+        val response = client.get("/api/posts/${post.postId}")
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals(false, response.body<PostDTO>().vehicleLocked)
+    }
+
+    @Test
+    fun `GET feed does not compute vehicleLocked, even for a contributing post`() = postTest { client ->
+        val owner = CommentTestSeed.seedUser(username = "owner")
+        seedContributingPost(owner.userId)
+        val viewer = CommentTestSeed.seedUser(username = "viewer", email = "viewer@example.com")
+        val viewerToken = tokenFor(viewer.authId, viewer.userId, viewer.email)
+
+        val response = client.get("/api/posts/feed") { bearerAuth(viewerToken) }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val feed = response.body<FeedResponseDTO>()
+        assertTrue(feed.posts.isNotEmpty())
+        feed.posts.forEach { assertEquals(false, it.vehicleLocked) }
     }
 
     @Test

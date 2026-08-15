@@ -32,6 +32,13 @@ data class PostDTO(
     val likedByCurrentUser: Boolean = false,
     val authorIsEarlySpotter: Boolean = false,
     val authorEarlySpotterNumber: Int? = null,
+    /**
+     * Whether this post's brand/model can no longer be changed because it has contributed to a
+     * challenge (see PostService.updatePostAsAuthor / PostVehicleLockedException). Only computed
+     * on GET /posts/{id} (PostService.findPostById) — [toDTO] and [toFeedDTO] leave it at the
+     * default `false` so feed pagination doesn't pay for an extra query per post.
+     */
+    val vehicleLocked: Boolean = false,
 )
 
 fun Post.toDTO(

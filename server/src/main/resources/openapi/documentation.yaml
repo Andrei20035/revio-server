@@ -702,6 +702,22 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: >
+            The post's car identification (carModelId/customBrand/customModel) can no longer be
+            changed because the post has contributed to a challenge. The caption may still be
+            updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [CHALLENGE_POST_VEHICLE_LOCKED]
+                required: [error, code]
     delete:
       summary: Delete own post
       description: Author only.

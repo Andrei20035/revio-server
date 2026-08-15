@@ -71,6 +71,9 @@ interface IChallengeProgressService {
 
     /** [userId]'s lifetime challenge participation — see [IChallengeHistoryDAO.getUserAggregates]. */
     suspend fun getUserAggregates(userId: UUID): ChallengeUserAggregates
+
+    /** Whether [postId] has ever contributed to any challenge — see [IChallengeProgressDAO.hasContributions]. */
+    suspend fun hasContributions(postId: UUID): Boolean
 }
 
 class ChallengeProgressService(
@@ -156,6 +159,9 @@ class ChallengeProgressService(
 
     override suspend fun getUserAggregates(userId: UUID): ChallengeUserAggregates =
         challengeHistoryDao.getUserAggregates(userId)
+
+    override suspend fun hasContributions(postId: UUID): Boolean =
+        challengeProgressDao.hasContributions(postId)
 
     private fun validateHistoryLimit(limit: Int): Int {
         if (limit == 0) return DEFAULT_HISTORY_LIMIT
