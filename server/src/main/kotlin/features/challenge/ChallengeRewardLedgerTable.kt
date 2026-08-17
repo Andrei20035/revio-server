@@ -9,7 +9,9 @@ import org.jetbrains.exposed.sql.javatime.timestampWithTimeZone
 /**
  * Audit trail for every challenge reward grant/revoke. nominal_delta is the reward as configured
  * (+/- reward_points); applied_delta is what actually happened to spot_score after the floor-at-0
- * clamp, so `spot_score == SUM(posts.points) + SUM(applied_delta)` stays a verifiable invariant.
+ * clamp, so `spot_score == SUM(posts.points) + SUM(challenge applied_delta) + SUM(early spotter
+ * applied_delta)` stays a verifiable invariant (see
+ * [com.revio.server.features.user.EarlySpotterBonusLedgerTable] for the early spotter term).
  * idempotency_key absorbs retries: it is built from (challenge, user, kind, award_epoch), so the
  * same logical grant/revoke can never be double-applied.
  */

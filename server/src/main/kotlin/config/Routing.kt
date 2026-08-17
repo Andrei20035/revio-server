@@ -20,6 +20,7 @@ import features.report.reportRoutes
 import com.revio.server.features.post.postRoutes
 import com.revio.server.features.user.userRoutes
 import com.revio.server.features.user_car.userCarRoutes
+import com.revio.server.features.waitlist.waitlistRoutes
 import io.ktor.server.application.*
 import io.ktor.server.http.content.*
 import io.ktor.server.response.*
@@ -56,6 +57,7 @@ fun Application.configureRouting() {
             postRoutes()
             userCarRoutes()
             userRoutes()
+            waitlistRoutes()
             get("/") {
                 call.respondText(
                     """Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt

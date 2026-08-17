@@ -95,6 +95,12 @@ import com.revio.server.features.user_car.IUserCarService
 import com.revio.server.features.user_car.UserCarDAO
 import com.revio.server.features.user_car.UserCarServiceImpl
 import com.revio.server.features.user_car.userCarRoutes
+import com.revio.server.features.waitlist.ISupabaseWaitlistClient
+import com.revio.server.features.waitlist.IWaitlistDAO
+import com.revio.server.features.waitlist.IWaitlistSyncService
+import com.revio.server.features.waitlist.WaitlistDAO
+import com.revio.server.features.waitlist.WaitlistSyncService
+import com.revio.server.features.waitlist.waitlistRoutes
 import features.comment.CommentDAO
 import features.comment.ICommentDAO
 import features.comment.CommentService
@@ -113,6 +119,7 @@ import features.report.ReportService
 import features.report.reportRoutes
 import io.ktor.server.application.*
 import io.ktor.server.routing.*
+import io.mockk.coEvery
 import io.mockk.mockk
 import org.koin.core.context.stopKoin
 import org.koin.dsl.module
@@ -750,6 +757,35 @@ fun Application.testAdminLeaderboardModule(adminToken: String, cronSecret: Strin
     routing {
         route("/api") {
             adminLeaderboardRoutes(adminTokenProvider = { adminToken }, cronSecretProvider = { cronSecret })
+        }
+    }
+}
+
+/**
+ * The Supabase client is mocked (always returns an empty page) — route tests exercise the
+ * secret gate, response shape, and idempotency, not the real Supabase HTTP call, which is
+ * already covered by WaitlistSyncServiceTest with the same mocking approach.
+ */
+fun Application.testWaitlistModule(cronSecret: String? = null, webhookSecret: String? = null) {
+    val koinTestModule = module {
+        single<IWaitlistDAO> { WaitlistDAO() }
+        single<ISupabaseWaitlistClient> {
+            mockk<ISupabaseWaitlistClient>().also {
+                coEvery { it.fetchPage(any(), any(), any()) } returns emptyList()
+            }
+        }
+        single<IWaitlistSyncService> { WaitlistSyncService(get(), get()) }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            waitlistRoutes(cronSecretProvider = { cronSecret }, webhookSecretProvider = { webhookSecret })
         }
     }
 }

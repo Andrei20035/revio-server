@@ -2,6 +2,7 @@ package com.revio.server.features.user
 
 import com.revio.server.features.auth.AuthTable
 import com.revio.server.features.post.PostTable
+import com.revio.server.features.scoring.ScoringServiceImpl
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
@@ -46,8 +47,9 @@ interface IUserDAO {
     suspend fun countPostsByUser(userId: UUID): Long
 
     /**
-     * Atomically add [delta] to spot_score (floored at 0) for [userId].
-     * Must be called inside an existing [transaction] block.
+     * Atomically add [delta] to spot_score (floored at 0) for [userId], via a single
+     * `GREATEST(0, spot_score + delta)` UPDATE run at READ COMMITTED — see [addSpotScore].
+     * Opens its own transaction; do not call from within another transaction block.
      */
     suspend fun incrementSpotScore(userId: UUID, delta: Int)
 
@@ -77,7 +79,7 @@ class UserDao : IUserDAO {
             explicitStatementType = StatementType.SELECT
         ) { rs -> if (rs.next()) rs.getInt("last_assigned") else null }
 
-        UserTable.insertReturning(listOf(UserTable.id)) {
+        val userId = UserTable.insertReturning(listOf(UserTable.id)) {
             it[authCredentialId] = user.authCredentialId
             it[profilePicturePath] = user.profilePicturePath
             it[fullName] = user.fullName
@@ -89,6 +91,24 @@ class UserDao : IUserDAO {
             it[isEarlySpotter] = assignedNumber != null
             it[earlySpotterNumber] = assignedNumber
         }.singleOrNull()?.get(UserTable.id)?.value ?: throw UserCreationException("Failed to insert user")
+
+        if (assignedNumber != null) {
+            val bonusPoints = ScoringServiceImpl.EARLY_SPOTTER_BONUS_POINTS
+            val ledgerInsertedRows = EarlySpotterBonusLedgerTable.insertIgnore {
+                it[EarlySpotterBonusLedgerTable.userId] = userId
+                it[EarlySpotterBonusLedgerTable.earlySpotterNumber] = assignedNumber
+                it[EarlySpotterBonusLedgerTable.nominalDelta] = bonusPoints
+                it[EarlySpotterBonusLedgerTable.appliedDelta] = bonusPoints
+                it[EarlySpotterBonusLedgerTable.reason] = EarlySpotterBonusReason.EARLY_SPOTTER_GRANTED
+                it[EarlySpotterBonusLedgerTable.idempotencyKey] = "early_spotter_bonus:$userId"
+            }.insertedCount
+
+            if (ledgerInsertedRows > 0) {
+                addSpotScore(userId, bonusPoints)
+            }
+        }
+
+        userId
     }
 
     override suspend fun getUserById(userId: UUID): User? = transaction {
@@ -193,18 +213,11 @@ class UserDao : IUserDAO {
         PostTable.selectAll().where { PostTable.userId eq userId }.count()
     }
 
-    override suspend fun incrementSpotScore(userId: UUID, delta: Int) = transaction {
-        val current = UserTable
-            .select(UserTable.spotScore)
-            .where { UserTable.id eq userId }
-            .singleOrNull()
-            ?.get(UserTable.spotScore) ?: 0
-        val newScore = maxOf(0, current + delta)
-        UserTable.update({ UserTable.id eq userId }) {
-            it[spotScore] = newScore
+    override suspend fun incrementSpotScore(userId: UUID, delta: Int): Unit =
+        transaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
+            addSpotScore(userId, delta)
+            Unit
         }
-        Unit
-    }
 
     override suspend fun advanceStreak(userId: UUID, localDay: LocalDate, timezoneId: String?) = transaction {
         val row = UserTable.select(

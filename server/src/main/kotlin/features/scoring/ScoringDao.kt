@@ -1,12 +1,13 @@
 package com.revio.server.features.scoring
 
 import com.revio.server.features.post.PostTable
-import com.revio.server.features.user.UserTable
+import com.revio.server.features.user.addPostPoints
+import com.revio.server.features.user.addSpotScore
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
+import java.sql.Connection
 import java.util.UUID
 
 interface IScoringDao {
@@ -40,59 +41,30 @@ interface IScoringDao {
 
 class ScoringDaoImpl : IScoringDao {
 
-    override suspend fun applyCreationPoints(userId: UUID, postId: UUID, points: Int) = transaction {
-        PostTable.update({ PostTable.id eq postId }) {
-            it[PostTable.points] = points
+    override suspend fun applyCreationPoints(userId: UUID, postId: UUID, points: Int): Unit =
+        transaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
+            PostTable.update({ PostTable.id eq postId }) {
+                it[PostTable.points] = points
+            }
+            addSpotScore(userId, points)
+            Unit
         }
-        val currentScore = UserTable
-            .select(UserTable.spotScore)
-            .where { UserTable.id eq userId }
-            .singleOrNull()
-            ?.get(UserTable.spotScore) ?: 0
-        val newScore = maxOf(0, currentScore + points)
-        UserTable.update({ UserTable.id eq userId }) {
-            it[UserTable.spotScore] = newScore
-        }
-        Unit
-    }
 
-    override suspend fun applyEngagementPoints(ownerId: UUID, postId: UUID, delta: Int) = transaction {
-        val currentPoints = PostTable
-            .select(PostTable.points)
-            .where { PostTable.id eq postId }
-            .singleOrNull()
-            ?.get(PostTable.points) ?: 0
-        val newPoints = maxOf(0, currentPoints + delta)
-        PostTable.update({ PostTable.id eq postId }) {
-            it[PostTable.points] = newPoints
+    override suspend fun applyEngagementPoints(ownerId: UUID, postId: UUID, delta: Int): Unit =
+        transaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
+            addPostPoints(postId, delta)
+            addSpotScore(ownerId, delta)
+            Unit
         }
-        val currentScore = UserTable
-            .select(UserTable.spotScore)
-            .where { UserTable.id eq ownerId }
-            .singleOrNull()
-            ?.get(UserTable.spotScore) ?: 0
-        val newScore = maxOf(0, currentScore + delta)
-        UserTable.update({ UserTable.id eq ownerId }) {
-            it[UserTable.spotScore] = newScore
-        }
-        Unit
-    }
 
-    override suspend fun reverseAndDeletePost(ownerId: UUID, postId: UUID, points: Int): Int = transaction {
-        reverseAndDeletePostInCurrentTransaction(ownerId, postId, points)
-    }
+    override suspend fun reverseAndDeletePost(ownerId: UUID, postId: UUID, points: Int): Int =
+        transaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
+            reverseAndDeletePostInCurrentTransaction(ownerId, postId, points)
+        }
 
     override fun reverseAndDeletePostInCurrentTransaction(ownerId: UUID, postId: UUID, points: Int): Int {
         if (points > 0) {
-            val currentScore = UserTable
-                .select(UserTable.spotScore)
-                .where { UserTable.id eq ownerId }
-                .singleOrNull()
-                ?.get(UserTable.spotScore) ?: 0
-            val newScore = maxOf(0, currentScore - points)
-            UserTable.update({ UserTable.id eq ownerId }) {
-                it[UserTable.spotScore] = newScore
-            }
+            addSpotScore(ownerId, -points)
         }
         return PostTable.deleteWhere { id eq postId }
     }

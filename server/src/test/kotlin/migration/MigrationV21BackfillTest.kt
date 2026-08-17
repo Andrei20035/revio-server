@@ -3,6 +3,7 @@ package migration
 import com.revio.server.features.auth.AuthTable
 import com.revio.server.features.post.PostSource
 import com.revio.server.features.post.PostTable
+import com.revio.server.features.user.EarlySpotterBonusLedgerTable
 import com.revio.server.features.user.User
 import com.revio.server.features.user.UserDao
 import com.revio.server.features.user.UserTable
@@ -227,6 +228,11 @@ class MigrationV21BackfillTest {
         applyV21()
         assertEquals(2, lastAssignedCounter())
 
+        // V21 backfilled alice and bob as early spotters retroactively — they must NOT receive
+        // the bonus, since it only applies to profiles created through UserDao.createUser.
+        val ledgerRowsAfterBackfill = transaction { EarlySpotterBonusLedgerTable.selectAll().count() }
+        assertEquals(0, ledgerRowsAfterBackfill)
+
         val dao = UserDao()
         val cred = transaction {
             AuthTable.insert {
@@ -250,5 +256,15 @@ class MigrationV21BackfillTest {
         val newUser = dao.getUserById(newUserId)
         assertEquals(3, newUser?.earlySpotterNumber)
         assertEquals(3, lastAssignedCounter())
+
+        // Unlike alice/bob, newcomer was created via UserDao.createUser after V21/V30 — it must
+        // receive the ledger entry and the 300-point bonus.
+        assertEquals(300, newUser?.spotScore)
+        val ledgerRowsAfterNewcomer = transaction {
+            EarlySpotterBonusLedgerTable.selectAll()
+                .where { EarlySpotterBonusLedgerTable.userId eq newUserId }
+                .count()
+        }
+        assertEquals(1, ledgerRowsAfterNewcomer)
     }
 }

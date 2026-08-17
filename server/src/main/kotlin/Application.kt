@@ -30,6 +30,7 @@ import com.revio.server.features.post.postModule
 import com.revio.server.features.scoring.scoringModule
 import com.revio.server.features.user.userModule
 import com.revio.server.features.user_car.userCarModule
+import com.revio.server.features.waitlist.waitlistModule
 import io.ktor.server.application.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.openapi.*
@@ -67,7 +68,8 @@ fun Application.module() {
             carFamilyModule,
             challengeModule,
             notificationModule,
-            moderationModule
+            moderationModule,
+            waitlistModule
         )
     }
 

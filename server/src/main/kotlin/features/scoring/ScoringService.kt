@@ -55,6 +55,14 @@ class ScoringServiceImpl(
         const val DAILY_CAMERA_CAP = 10
         const val LIKE_POINTS = 1
         const val COMMENT_POINTS = 5
+
+        /**
+         * One-time bonus granted to every Early Spotter at profile creation — see
+         * [com.revio.server.features.user.UserDao.createUser]. Not applied through
+         * [IScoringService]: it isn't event-driven on a post, and must run inside the same
+         * transaction that allocates the early_spotter_number.
+         */
+        const val EARLY_SPOTTER_BONUS_POINTS = 300
     }
 
     override suspend fun onPostCreated(

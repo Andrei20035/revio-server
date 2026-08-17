@@ -1,5 +1,7 @@
 package dao
 
+import com.revio.server.features.user.EarlySpotterBonusLedgerTable
+import com.revio.server.features.user.EarlySpotterBonusReason
 import com.revio.server.features.user.UserDao
 import com.revio.server.features.user.UserTable
 import kotlinx.coroutines.Dispatchers
@@ -9,8 +11,12 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.jetbrains.exposed.exceptions.ExposedSQLException
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.insertReturning
+import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.transaction
+import java.sql.Connection
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -231,5 +237,157 @@ class EarlySpotterDaoTest {
                 }
             }
         }
+    }
+
+    // --- Test 9: slot disponibil → ledger scris, spot_score == 300 ---
+
+    @Test
+    fun `createUser with an available slot writes a ledger entry and grants the 300-point bonus`() = runTest {
+        val cred = UserTestSeed.seedAuthCredential("bonus@example.com")
+        val userId = dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "bonus"))
+
+        val user = dao.getUserById(userId)
+        assertNotNull(user)
+        assertTrue(user!!.isEarlySpotter)
+        assertEquals(300, user.spotScore)
+
+        val ledgerRow = transaction {
+            EarlySpotterBonusLedgerTable
+                .selectAll()
+                .where { EarlySpotterBonusLedgerTable.userId eq userId }
+                .single()
+        }
+        assertEquals(user.earlySpotterNumber, ledgerRow[EarlySpotterBonusLedgerTable.earlySpotterNumber])
+        assertEquals(300, ledgerRow[EarlySpotterBonusLedgerTable.nominalDelta])
+        assertEquals(300, ledgerRow[EarlySpotterBonusLedgerTable.appliedDelta])
+        assertEquals(EarlySpotterBonusReason.EARLY_SPOTTER_GRANTED, ledgerRow[EarlySpotterBonusLedgerTable.reason])
+        assertEquals("early_spotter_bonus:$userId", ledgerRow[EarlySpotterBonusLedgerTable.idempotencyKey])
+    }
+
+    // --- Test 10: dupa epuizarea celor 1000 → fara ledger, spot_score == 0, earlySpotterNumber == null ---
+
+    @Test
+    fun `createUser after the 1000 slots are exhausted writes no ledger entry and grants no bonus`() = runTest {
+        repeat(1000) { i ->
+            val cred = UserTestSeed.seedAuthCredential("slotb$i@example.com")
+            dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "slotb$i"))
+        }
+
+        val lateCred = UserTestSeed.seedAuthCredential("lateb@example.com")
+        val lateUserId = dao.createUser(UserTestSeed.buildUser(lateCred.authCredentialId, username = "lateb"))
+        val lateUser = dao.getUserById(lateUserId)
+
+        assertNotNull(lateUser)
+        assertFalse(lateUser!!.isEarlySpotter)
+        assertNull(lateUser.earlySpotterNumber)
+        assertEquals(0, lateUser.spotScore)
+
+        val ledgerCount = transaction {
+            EarlySpotterBonusLedgerTable
+                .selectAll()
+                .where { EarlySpotterBonusLedgerTable.userId eq lateUserId }
+                .count()
+        }
+        assertEquals(0, ledgerCount.toInt())
+    }
+
+    // --- Test 11: N creari concurente in jurul limitei de 1000 → exact 1000 numere, exact 1000 intrari de ledger, fiecare 300 puncte ---
+
+    @Test
+    fun `concurrent createUser calls around the 1000 limit produce exactly 1000 ledger entries each with the bonus applied`() =
+        runBlocking(Dispatchers.IO) {
+            val preFill = 995
+            repeat(preFill) { i ->
+                val cred = UserTestSeed.seedAuthCredential("pref$i@example.com")
+                dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "pref$i"))
+            }
+
+            val n = 10
+            val credentials = (1..n).map { i -> UserTestSeed.seedAuthCredential("boundary$i@example.com") }
+
+            val userIds = credentials.mapIndexed { i, cred ->
+                async { dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "boundary$i")) }
+            }.awaitAll()
+
+            val users = userIds.map { dao.getUserById(it)!! }
+            val earlySpotters = users.filter { it.isEarlySpotter }
+            val nonSpotters = users.filter { !it.isEarlySpotter }
+
+            assertEquals(5, earlySpotters.size, "Only 5 of the 1000 slots remain after prefilling 995")
+            assertEquals(5, nonSpotters.size)
+            earlySpotters.forEach { assertEquals(300, it.spotScore) }
+            nonSpotters.forEach { assertEquals(0, it.spotScore) }
+
+            val ledgerCount = transaction { EarlySpotterBonusLedgerTable.selectAll().count() }
+            assertEquals(1000, ledgerCount.toInt())
+
+            val earlySpotterNumbers = transaction {
+                EarlySpotterBonusLedgerTable.selectAll().map { it[EarlySpotterBonusLedgerTable.earlySpotterNumber] }.toSet()
+            }
+            assertEquals((1..1000).toSet(), earlySpotterNumbers)
+        }
+
+    // --- Test 12: exceptie dupa insertul in ledger, inainte de commit → nimic nu persista ---
+
+    /**
+     * UserDao.createUser has no injectable dependency to mock a mid-transaction failure through,
+     * so this reproduces its exact statement sequence (advisory lock, counter increment, user
+     * insert, ledger insert) inside a test-owned transaction and forces a failure right after the
+     * ledger insert. Proves the whole sequence lives in one atomic transaction — the same
+     * guarantee createUser relies on for its rollback-on-failure behavior.
+     */
+    @Test
+    fun `an exception after the ledger insert rolls back the user, the ledger row, and the counter increment`() {
+        val cred = UserTestSeed.seedAuthCredential("rollback@example.com")
+
+        assertThrows<IllegalStateException> {
+            transaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
+                exec("SELECT pg_advisory_xact_lock(8123001)")
+
+                val assignedNumber = exec(
+                    """
+                    UPDATE early_spotter_counter
+                       SET last_assigned = last_assigned + 1
+                     WHERE last_assigned < 1000
+                    RETURNING last_assigned
+                    """.trimIndent(),
+                    explicitStatementType = StatementType.SELECT
+                ) { rs -> if (rs.next()) rs.getInt("last_assigned") else null }
+
+                val userId = UserTable.insertReturning(listOf(UserTable.id)) {
+                    it[authCredentialId] = cred.authCredentialId
+                    it[fullName] = "Rollback"
+                    it[username] = "rollbackuser"
+                    it[country] = "RO"
+                    it[birthDate] = java.time.LocalDate.of(1995, 1, 1)
+                    it[isEarlySpotter] = assignedNumber != null
+                    it[earlySpotterNumber] = assignedNumber
+                }.single()[UserTable.id].value
+
+                EarlySpotterBonusLedgerTable.insert {
+                    it[EarlySpotterBonusLedgerTable.userId] = userId
+                    it[EarlySpotterBonusLedgerTable.earlySpotterNumber] = assignedNumber!!
+                    it[EarlySpotterBonusLedgerTable.nominalDelta] = 300
+                    it[EarlySpotterBonusLedgerTable.appliedDelta] = 300
+                    it[EarlySpotterBonusLedgerTable.reason] = EarlySpotterBonusReason.EARLY_SPOTTER_GRANTED
+                    it[EarlySpotterBonusLedgerTable.idempotencyKey] = "early_spotter_bonus:$userId"
+                }
+
+                error("forced failure after ledger insert, before commit")
+            }
+        }
+
+        val userCount = transaction { UserTable.selectAll().count() }
+        val ledgerCount = transaction { EarlySpotterBonusLedgerTable.selectAll().count() }
+        val counterValue = transaction {
+            exec("SELECT last_assigned FROM early_spotter_counter WHERE id = 1") { rs ->
+                rs.next()
+                rs.getInt("last_assigned")
+            }
+        }
+
+        assertEquals(0, userCount.toInt())
+        assertEquals(0, ledgerCount.toInt())
+        assertEquals(0, counterValue)
     }
 }
