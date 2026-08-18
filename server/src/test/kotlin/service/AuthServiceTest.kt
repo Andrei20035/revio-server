@@ -9,8 +9,10 @@ import com.revio.server.features.auth.GoogleTokenVerifier
 import com.revio.server.features.auth.GoogleUser
 import com.revio.server.features.auth.IAuthDAO
 import com.revio.server.features.user.IUserService
+import com.revio.server.features.user.UsernameAvailabilityResult
 import com.revio.server.features.user.dto.UserDTO
 import com.revio.server.features.waitlist.IWaitlistLookupService
+import com.revio.server.features.waitlist.WaitlistEntry
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -23,6 +25,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.time.OffsetDateTime
 import java.util.UUID
 
 class AuthServiceTest {
@@ -147,6 +150,18 @@ class AuthServiceTest {
         }
     }
 
+    private fun fakeWaitlistEntry(username: String?) = WaitlistEntry(
+        id = UUID.randomUUID(),
+        email = "alice@example.com",
+        emailNormalized = "alice@example.com",
+        username = username,
+        platform = "ios",
+        country = "RO",
+        sourceCreatedAt = OffsetDateTime.now(),
+        sourceUpdatedAt = OffsetDateTime.now(),
+        syncedAt = OffsetDateTime.now(),
+    )
+
     // ---------- regularLogin ----------
 
     @Test
@@ -183,6 +198,7 @@ class AuthServiceTest {
     fun `regularLogin returns DTO without userId when profile is missing`() = runTest {
         val dao = mockk<IAuthDAO>()
         val userService = mockk<IUserService>()
+        val waitlistLookupService = mockk<IWaitlistLookupService>()
         val hashed = BCrypt.withDefaults().hashToString(12, "Passw0rd!".toCharArray())
         val id = UUID.randomUUID()
         coEvery { dao.getCredentialsForLogin("alice@example.com") } returns AuthCredential(
@@ -193,12 +209,75 @@ class AuthServiceTest {
             googleId = null
         )
         coEvery { userService.getUserByAuthCredentialId(id) } returns null
+        coEvery { waitlistLookupService.lookup("alice@example.com") } returns null
 
-        val service = newService(dao = dao, userService = userService)
+        val service = newService(dao = dao, userService = userService, waitlistLookupService = waitlistLookupService)
         val dto = service.regularLogin("alice@example.com", "Passw0rd!")
 
         assertNotNull(dto)
         assertNull(dto!!.userId)
+    }
+
+    @Test
+    fun `regularLogin with credential existing but no profile yet returns waitlist prefill`() = runTest {
+        val dao = mockk<IAuthDAO>()
+        val userService = mockk<IUserService>()
+        val waitlistLookupService = mockk<IWaitlistLookupService>()
+        val hashed = BCrypt.withDefaults().hashToString(12, "Passw0rd!".toCharArray())
+        val id = UUID.randomUUID()
+        coEvery { dao.getCredentialsForLogin("alice@example.com") } returns AuthCredential(
+            id = id,
+            email = "alice@example.com",
+            password = hashed,
+            provider = AuthProvider.REGULAR,
+            googleId = null
+        )
+        coEvery { userService.getUserByAuthCredentialId(id) } returns null
+        coEvery { waitlistLookupService.lookup("alice@example.com") } returns fakeWaitlistEntry("coolname")
+        coEvery { userService.checkUsernameAvailabilityForNewUser("coolname") } returns UsernameAvailabilityResult(
+            available = true,
+            normalized = "coolname",
+            reason = null,
+        )
+
+        val service = newService(dao = dao, userService = userService, waitlistLookupService = waitlistLookupService)
+        val dto = service.regularLogin("alice@example.com", "Passw0rd!")
+
+        assertNotNull(dto)
+        assertNull(dto!!.userId)
+        assertNotNull(dto.waitlist)
+        assertEquals("coolname", dto.waitlist!!.suggestedUsername)
+    }
+
+    @Test
+    fun `regularLogin with an existing profile does not look up the waitlist`() = runTest {
+        val dao = mockk<IAuthDAO>()
+        val userService = mockk<IUserService>()
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+        val hashed = BCrypt.withDefaults().hashToString(12, "Passw0rd!".toCharArray())
+        val id = UUID.randomUUID()
+        val userId = UUID.randomUUID()
+        coEvery { dao.getCredentialsForLogin("alice@example.com") } returns AuthCredential(
+            id = id,
+            email = "alice@example.com",
+            password = hashed,
+            provider = AuthProvider.REGULAR,
+            googleId = null
+        )
+        coEvery { userService.getUserByAuthCredentialId(id) } returns UserDTO(
+            id = userId,
+            fullName = "Alice Example",
+            username = "alice",
+            country = "Romania"
+        )
+
+        val service = newService(dao = dao, userService = userService, waitlistLookupService = waitlistLookupService)
+        val dto = service.regularLogin("alice@example.com", "Passw0rd!")
+
+        assertNotNull(dto)
+        assertEquals(userId, dto!!.userId)
+        assertNull(dto.waitlist)
+        coVerify(exactly = 0) { waitlistLookupService.lookup(any()) }
     }
 
     @Test
@@ -337,6 +416,47 @@ class AuthServiceTest {
         assertNotNull(dto)
         assertEquals(existingId, dto!!.id)
         assertEquals(userId, dto.userId)
+    }
+
+    @Test
+    fun `googleLogin with existing GOOGLE matching googleId but no profile yet returns waitlist prefill`() = runTest {
+        val dao = mockk<IAuthDAO>()
+        val userService = mockk<IUserService>()
+        val verifier = mockk<GoogleTokenVerifier>()
+        val waitlistLookupService = mockk<IWaitlistLookupService>()
+        val existingId = UUID.randomUUID()
+
+        coEvery { verifier.verify(any()) } returns GoogleUser(
+            email = "bob@example.com",
+            googleId = "gid-1"
+        )
+        coEvery { dao.getCredentialsForLogin("bob@example.com") } returns AuthCredential(
+            id = existingId,
+            email = "bob@example.com",
+            password = null,
+            provider = AuthProvider.GOOGLE,
+            googleId = "gid-1"
+        )
+        coEvery { userService.getUserByAuthCredentialId(existingId) } returns null
+        coEvery { waitlistLookupService.lookup("bob@example.com") } returns fakeWaitlistEntry("bobbywait")
+        coEvery { userService.checkUsernameAvailabilityForNewUser("bobbywait") } returns UsernameAvailabilityResult(
+            available = true,
+            normalized = "bobbywait",
+            reason = null,
+        )
+
+        val service = newService(
+            dao = dao,
+            userService = userService,
+            verifier = verifier,
+            waitlistLookupService = waitlistLookupService,
+        )
+        val dto = service.googleLogin("valid-token")
+
+        assertNotNull(dto)
+        assertNull(dto!!.userId)
+        assertNotNull(dto.waitlist)
+        assertEquals("bobbywait", dto.waitlist!!.suggestedUsername)
     }
 
     @Test

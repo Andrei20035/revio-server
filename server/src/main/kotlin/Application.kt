@@ -12,6 +12,7 @@ import com.revio.server.core.di.appModule
 import com.revio.server.core.util.resolveZone
 import com.revio.server.features.account_deletion.accountDeletionModule
 import com.revio.server.features.activity.activityModule
+import com.revio.server.features.announcement.announcementModule
 import com.revio.server.features.auth.authModule
 import com.revio.server.features.car_family.carFamilyModule
 import com.revio.server.features.car_model.carModelModule
@@ -50,6 +51,7 @@ fun Application.module() {
     install(Koin) {
         slf4jLogger()
         modules(appModule,
+            announcementModule,
             authModule,
             userModule,
             scoringModule,

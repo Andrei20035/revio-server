@@ -9,6 +9,11 @@ import com.revio.server.features.account_deletion.AccountDeletionFeedbackDAO
 import com.revio.server.features.account_deletion.AccountDeletionService
 import com.revio.server.features.account_deletion.IAccountDeletionFeedbackDAO
 import com.revio.server.features.account_deletion.IAccountDeletionService
+import com.revio.server.features.announcement.AnnouncementService
+import com.revio.server.features.announcement.IAnnouncementService
+import com.revio.server.features.announcement.IUserAnnouncementDAO
+import com.revio.server.features.announcement.UserAnnouncementDAO
+import com.revio.server.features.announcement.announcementRoutes
 import com.revio.server.features.auth.AuthDAO
 import com.revio.server.features.auth.AuthService
 import com.revio.server.features.auth.GoogleTokenVerifier
@@ -712,6 +717,46 @@ fun Application.testUserModule(storage: IStorageService? = null) {
     routing {
         route("/api") {
             userRoutes()
+        }
+    }
+}
+
+/**
+ * Ktor module for /api/users (POST — including its pendingAnnouncements field) and
+ * /api/users/me/announcements together: creating an Early Spotter profile and then reading back
+ * its PENDING announcements are one flow, so both route groups are wired here.
+ */
+fun Application.testAnnouncementModule(storage: IStorageService? = null) {
+    val uploadsDir = Files.createTempDirectory("announcement-route-test-uploads")
+    val koinTestModule = module {
+        single<IUserDAO> { UserDao() }
+        single<IAuthSessionDAO> { AuthSessionDAO() }
+        single { RefreshTokenGenerator() }
+        single<ISessionService> { SessionService(get(), get()) }
+        single<IStorageService> { storage ?: LocalImageStorageService(uploadsDir, "http://localhost:8080") }
+        single<IUserService> { UserService(get(), get()) }
+        single<IUserAnnouncementDAO> { UserAnnouncementDAO() }
+        single<IAnnouncementService> { AnnouncementService(get()) }
+        single {
+            JwtService(
+                jwtSecret = TestEnv.JWT_SECRET,
+                jwtIssuer = TestEnv.JWT_ISSUER,
+                jwtAudience = TestEnv.JWT_AUDIENCE
+            )
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+    configureSecurity(getKoin().get())
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            userRoutes()
+            announcementRoutes()
         }
     }
 }

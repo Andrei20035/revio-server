@@ -391,6 +391,29 @@ class AuthRoutesTest {
         }
     }
 
+    // ---- LOGIN (REGULAR, profile not yet created): waitlist prefill ----
+
+    @Test
+    fun `login REGULAR with an existing credential but no profile yet and an email found in the waitlist returns waitlist suggestedUsername`() = runTest {
+        val credential = UserTestSeed.seedAuthCredential("waitlisted@example.com", password = "Passw0rd!")
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+        coEvery { waitlistLookupService.lookup("waitlisted@example.com") } returns fakeWaitlistEntry("coolname")
+
+        authTest(waitlistLookupService = waitlistLookupService) { client ->
+            val resp = client.post("/api/auth/login") {
+                contentType(ContentType.Application.Json)
+                setBody(LoginRequest(email = credential.email, password = "Passw0rd!", provider = AuthProvider.REGULAR))
+            }
+
+            assertEquals(HttpStatusCode.OK, resp.status)
+            val body = resp.body<AuthResponse>()
+            assertEquals(OnboardingStep.PROFILE_REQUIRED, body.onboardingStep)
+            assertNotNull(body.waitlist)
+            assertEquals("coolname", body.waitlist!!.suggestedUsername)
+            assertEquals(WaitlistUsernameStatus.AVAILABLE, body.waitlist!!.suggestedUsernameStatus)
+        }
+    }
+
     @Test
     fun `two users registering with the same waitlist-suggested username - first succeeds, second gets 409`() = runTest {
         val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)

@@ -27,8 +27,11 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 import org.koin.ktor.ext.inject
+import org.slf4j.LoggerFactory
 import java.time.LocalDate
 import java.util.UUID
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.user.UserRoutes")
 
 private const val PROFILE_PICTURE_MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
 private val profilePictureAllowedContentTypes = setOf("image/jpeg", "image/png", "image/webp")
@@ -77,6 +80,13 @@ fun Route.userRoutes() {
                         user = request.toUser(credentialId),
                     )
                     val newUserId = createResult.userId
+                    logger.info(
+                        "Profile created userId={} isEarlySpotter={} earlySpotterNumber={} bonusGrantedNow={}",
+                        newUserId,
+                        createResult.isEarlySpotter,
+                        createResult.earlySpotterNumber,
+                        createResult.bonusGrantedNow,
+                    )
                     val (session, refreshToken) = sessionService.promoteSession(sessionId, newUserId)
                     // A freshly created profile is always UserRole.USER (createUser never sets role,
                     // it relies on the DB default) — re-read anyway so this call site stays uniform
@@ -102,6 +112,7 @@ fun Route.userRoutes() {
                             } else {
                                 null
                             },
+                            pendingAnnouncements = createResult.pendingAnnouncements.map { it.name },
                         )
                     )
                 } catch (e: UsernameAlreadyExistsException) {

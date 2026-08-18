@@ -129,11 +129,14 @@ class AuthService(
             .verify(password.toCharArray(), storedPassword)
             .verified
 
-        return if (passwordValid) {
-            authCredential.toDTO(authCredential.currentUserId())
-        } else {
-            null
-        }
+        if (!passwordValid) return null
+
+        val userId = authCredential.currentUserId()
+        // Waitlist recognition is only meaningful pre-profile (Profile Customization reads the
+        // prefill); an existing profile never needs it, so this only looks up when userId == null.
+        // WaitlistLookupService.lookup() never throws, so this can never fail the login.
+        val waitlistPrefill = if (userId == null) resolveWaitlistPrefill(normalizedEmail) else null
+        return authCredential.toDTO(userId, waitlist = waitlistPrefill)
     }
 
     override suspend fun googleLogin(googleIdToken: String): AuthDTO? {
@@ -157,7 +160,10 @@ class AuthService(
             existingCredential != null &&
                     existingCredential.provider == AuthProvider.GOOGLE &&
                     existingCredential.googleId == googleUser.googleId -> {
-                existingCredential.toDTO(existingCredential.currentUserId())
+                val userId = existingCredential.currentUserId()
+                // Same pre-profile-only waitlist recognition as regularLogin() above.
+                val waitlistPrefill = if (userId == null) resolveWaitlistPrefill(googleUser.email) else null
+                existingCredential.toDTO(userId, waitlist = waitlistPrefill)
             }
 
             existingCredential != null &&
@@ -236,6 +242,16 @@ class AuthService(
     private suspend fun AuthCredential.currentUserId(): UUID? {
         val credentialId = id ?: return null
         return userService.getUserByAuthCredentialId(credentialId)?.id
+    }
+
+    /** Same waitlist recognition contract used by createCredentials' callers (AuthRoutes.kt /register). */
+    private suspend fun resolveWaitlistPrefill(normalizedEmail: String): WaitlistPrefillDTO? {
+        val waitlistEntry = waitlistLookupService.lookup(normalizedEmail) ?: return null
+        val usernameCheck = userService.checkUsernameAvailabilityForNewUser(waitlistEntry.username.orEmpty())
+        return WaitlistPrefillDTO(
+            suggestedUsername = waitlistEntry.username,
+            suggestedUsernameStatus = usernameCheck.toWaitlistUsernameStatus(),
+        )
     }
 }
 

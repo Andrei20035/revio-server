@@ -10,6 +10,9 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import org.koin.ktor.ext.inject
+import org.slf4j.LoggerFactory
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.announcement.AnnouncementRoutes")
 
 fun Route.announcementRoutes() {
     val announcementService: IAnnouncementService by application.inject()
@@ -20,7 +23,9 @@ fun Route.announcementRoutes() {
                 val userId = call.getUuidClaim("userId")
                     ?: return@get call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid userId claim"))
 
-                call.respond(HttpStatusCode.OK, announcementService.getPending(userId))
+                val pending = announcementService.getPending(userId)
+                logger.info("Returning {} pending announcement(s) for user {}", pending.size, userId)
+                call.respond(HttpStatusCode.OK, pending)
             }
 
             post("/ack") {

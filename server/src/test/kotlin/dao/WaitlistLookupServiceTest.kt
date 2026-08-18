@@ -81,6 +81,19 @@ class WaitlistLookupServiceTest {
         WaitlistTable.selectAll().where { WaitlistTable.id eq id }.any()
     }
 
+    /**
+     * Backdates [service]'s internal per-email negative-lookup timestamp for [email] via
+     * reflection — the field is intentionally private with no test hook, so this is the only way
+     * to simulate an expired TTL without an actual 60+ second sleep.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun backdateNegativeLookup(service: WaitlistLookupService, email: String, secondsAgo: Long) {
+        val field = WaitlistLookupService::class.java.getDeclaredField("recentLiveMisses")
+        field.isAccessible = true
+        val map = field.get(service) as java.util.concurrent.ConcurrentHashMap<String, OffsetDateTime>
+        map[email] = OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(secondsAgo)
+    }
+
     // --- Test 1: gasit local -> nu atinge Supabase ---
 
     @Test
@@ -96,18 +109,56 @@ class WaitlistLookupServiceTest {
         coVerify(exactly = 0) { client.fetchByEmail(any()) }
     }
 
-    // --- Test 2: negasit + sincronizare recenta -> nu atinge Supabase ---
+    // --- Test 2: negasit local, un ALT rand sincronizat de curand -> gate-ul e per-email, nu global, deci lookup-ul live SE FACE ---
 
     @Test
-    fun `an email missing locally with a recent sync does not contact Supabase`() = runTest {
+    fun `an email missing locally with a different row synced recently still triggers a live lookup`() = runTest {
         waitlistDao.upsertBatch(listOf(row(email = "other@example.com")))
         val client = mockk<ISupabaseWaitlistClient>()
+        coEvery { client.fetchByEmail("missing@example.com") } returns null
 
         val service = WaitlistLookupService(waitlistDao, client)
         val result = service.lookup("missing@example.com")
 
         assertNull(result)
-        coVerify(exactly = 0) { client.fetchByEmail(any()) }
+        coVerify(exactly = 1) { client.fetchByEmail("missing@example.com") }
+    }
+
+    // --- Test 2b: acelasi email ratat de doua ori in <TTL -> al doilea nu mai contacteaza Supabase ---
+
+    @Test
+    fun `the same email missed twice within the TTL does not contact Supabase a second time`() = runTest {
+        val client = mockk<ISupabaseWaitlistClient>()
+        coEvery { client.fetchByEmail("missing@example.com") } returns null
+
+        val service = WaitlistLookupService(waitlistDao, client)
+
+        assertNull(service.lookup("missing@example.com"))
+        assertNull(service.lookup("missing@example.com"))
+
+        coVerify(exactly = 1) { client.fetchByEmail("missing@example.com") }
+    }
+
+    // --- Test 2c: acelasi email, dar TTL-ul per-email a expirat -> lookup-ul live se reface si rezultatul e persistat ---
+
+    @Test
+    fun `the same email missed once past the TTL triggers another live lookup and persists the result`() = runTest {
+        val client = mockk<ISupabaseWaitlistClient>()
+        coEvery { client.fetchByEmail("missing@example.com") } returns null
+
+        val service = WaitlistLookupService(waitlistDao, client)
+        assertNull(service.lookup("missing@example.com"))
+        backdateNegativeLookup(service, "missing@example.com", secondsAgo = 61)
+
+        val liveId = UUID.randomUUID()
+        coEvery { client.fetchByEmail("missing@example.com") } returns row(id = liveId, email = "missing@example.com")
+
+        val result = service.lookup("missing@example.com")
+
+        assertNotNull(result)
+        assertEquals("missing@example.com", result!!.emailNormalized)
+        coVerify(exactly = 2) { client.fetchByEmail("missing@example.com") }
+        assertEquals(true, rowExistsById(liveId))
     }
 
     // --- Test 3: negasit + sincronizare veche -> lookup live, rezultatul e persistat local ---
