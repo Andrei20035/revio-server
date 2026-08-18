@@ -1,5 +1,8 @@
 package com.revio.server.features.user
 
+import com.revio.server.features.announcement.AnnouncementKey
+import com.revio.server.features.announcement.AnnouncementStatus
+import com.revio.server.features.announcement.UserAnnouncementTable
 import com.revio.server.features.auth.AuthTable
 import com.revio.server.features.post.PostTable
 import com.revio.server.features.scoring.ScoringServiceImpl
@@ -24,8 +27,25 @@ data class BanState(
         permanent || (bannedUntil != null && bannedUntil.isAfter(now))
 }
 
+/**
+ * Result of [IUserDAO.createUser] — surfaces what [UserDao.createUser]'s single transaction
+ * already knows about Early Spotter allocation, instead of discarding it behind a bare [UUID].
+ * [bonusGrantedNow] is true only when the 300-point ledger row was actually inserted in this
+ * call (always true when [isEarlySpotter] is true, since the ledger's idempotency key is derived
+ * from the freshly created [userId] and can never already exist).
+ * [pendingAnnouncements] mirrors the PENDING rows just written to `user_announcements` in the
+ * same transaction — empty unless [bonusGrantedNow] is true.
+ */
+data class CreateUserProfileResult(
+    val userId: UUID,
+    val isEarlySpotter: Boolean,
+    val earlySpotterNumber: Int?,
+    val bonusGrantedNow: Boolean,
+    val pendingAnnouncements: List<AnnouncementKey> = emptyList(),
+)
+
 interface IUserDAO {
-    suspend fun createUser(user: User): UUID
+    suspend fun createUser(user: User): CreateUserProfileResult
     suspend fun getUserById(userId: UUID): User?
 
     /** Current ban fields for [userId]. Null if the user doesn't exist. */
@@ -66,7 +86,7 @@ interface IUserDAO {
 }
 
 class UserDao : IUserDAO {
-    override suspend fun createUser(user: User): UUID = transaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
+    override suspend fun createUser(user: User): CreateUserProfileResult = transaction(transactionIsolation = Connection.TRANSACTION_READ_COMMITTED) {
         exec("SELECT pg_advisory_xact_lock(8123001)")
 
         val assignedNumber = exec(
@@ -92,6 +112,8 @@ class UserDao : IUserDAO {
             it[earlySpotterNumber] = assignedNumber
         }.singleOrNull()?.get(UserTable.id)?.value ?: throw UserCreationException("Failed to insert user")
 
+        var bonusGrantedNow = false
+        val pendingAnnouncements = mutableListOf<AnnouncementKey>()
         if (assignedNumber != null) {
             val bonusPoints = ScoringServiceImpl.EARLY_SPOTTER_BONUS_POINTS
             val ledgerInsertedRows = EarlySpotterBonusLedgerTable.insertIgnore {
@@ -105,10 +127,34 @@ class UserDao : IUserDAO {
 
             if (ledgerInsertedRows > 0) {
                 addSpotScore(userId, bonusPoints)
+                bonusGrantedNow = true
+
+                // Same transaction as the allocation above — the welcome/bonus announcements
+                // must exist iff the Early Spotter status and the ledger row do.
+                UserAnnouncementTable.insert {
+                    it[UserAnnouncementTable.userId] = userId
+                    it[announcementKey] = AnnouncementKey.EARLY_SPOTTER_WELCOME.name
+                    it[status] = AnnouncementStatus.PENDING.name
+                    it[payload] = """{"earlySpotterNumber":$assignedNumber}"""
+                }
+                UserAnnouncementTable.insert {
+                    it[UserAnnouncementTable.userId] = userId
+                    it[announcementKey] = AnnouncementKey.EARLY_SPOTTER_BONUS.name
+                    it[status] = AnnouncementStatus.PENDING.name
+                    it[payload] = """{"points":$bonusPoints}"""
+                }
+                pendingAnnouncements += AnnouncementKey.EARLY_SPOTTER_WELCOME
+                pendingAnnouncements += AnnouncementKey.EARLY_SPOTTER_BONUS
             }
         }
 
-        userId
+        CreateUserProfileResult(
+            userId = userId,
+            isEarlySpotter = assignedNumber != null,
+            earlySpotterNumber = assignedNumber,
+            bonusGrantedNow = bonusGrantedNow,
+            pendingAnnouncements = pendingAnnouncements,
+        )
     }
 
     override suspend fun getUserById(userId: UUID): User? = transaction {

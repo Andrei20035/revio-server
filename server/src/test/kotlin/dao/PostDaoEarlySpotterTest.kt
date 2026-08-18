@@ -55,7 +55,7 @@ class PostDaoEarlySpotterTest {
     fun `feed post from early spotter author carries authorIsEarlySpotter true and number`() {
         val cred = UserTestSeed.seedAuthCredential("early@example.com")
         val earlyUserId = kotlinx.coroutines.runBlocking {
-            userDAO.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "earlyauthor"))
+            userDAO.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "earlyauthor")).userId
         }
         seedPost(earlyUserId)
 
@@ -93,7 +93,7 @@ class PostDaoEarlySpotterTest {
     fun `feed with mixed authors carries correct early spotter flags per post`() {
         val earlyCred = UserTestSeed.seedAuthCredential("early2@example.com")
         val earlyUserId = kotlinx.coroutines.runBlocking {
-            userDAO.createUser(UserTestSeed.buildUser(earlyCred.authCredentialId, username = "earlyauthor2"))
+            userDAO.createUser(UserTestSeed.buildUser(earlyCred.authCredentialId, username = "earlyauthor2")).userId
         }
         val regularCred = UserTestSeed.seedAuthCredential("regular2@example.com")
         val regularUserId = UserTestSeed.seedUser(regularCred.authCredentialId, username = "regularauthor2")

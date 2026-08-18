@@ -97,6 +97,7 @@ import com.revio.server.features.user_car.UserCarServiceImpl
 import com.revio.server.features.user_car.userCarRoutes
 import com.revio.server.features.waitlist.ISupabaseWaitlistClient
 import com.revio.server.features.waitlist.IWaitlistDAO
+import com.revio.server.features.waitlist.IWaitlistLookupService
 import com.revio.server.features.waitlist.IWaitlistSyncService
 import com.revio.server.features.waitlist.WaitlistDAO
 import com.revio.server.features.waitlist.WaitlistSyncService
@@ -171,7 +172,11 @@ private fun setEnv(key: String, value: String) {
  * NU invocă configureDatabases (DB-ul e deja pornit de TestDatabaseFactory).
  * NU invocă configureSockets / configureHTTP (inutile pentru testele /auth).
  */
-fun Application.testAuthModule(googleTokenVerifier: GoogleTokenVerifier, storage: IStorageService? = null) {
+fun Application.testAuthModule(
+    googleTokenVerifier: GoogleTokenVerifier,
+    storage: IStorageService? = null,
+    waitlistLookupService: IWaitlistLookupService = mockk(relaxed = true),
+) {
     val uploadsDir = Files.createTempDirectory("auth-route-test-uploads")
     val koinTestModule = module {
         single<IAuthDAO> { AuthDAO() }
@@ -182,7 +187,8 @@ fun Application.testAuthModule(googleTokenVerifier: GoogleTokenVerifier, storage
         single<IStorageService> { storage ?: LocalImageStorageService(uploadsDir, "http://localhost:8080") }
         single<IUserService> { UserService(get(), get()) }
         single<GoogleTokenVerifier> { googleTokenVerifier }
-        single<IAuthService> { AuthService(get(), get(), get()) }
+        single<IWaitlistLookupService> { waitlistLookupService }
+        single<IAuthService> { AuthService(get(), get(), get(), get()) }
         single<ILikeDAO> { LikeDAO() }
         single<ILeaderboardDAO> { LeaderboardDAO() }
         single<ILeaderboardSnapshotDAO> { LeaderboardSnapshotDAO() }
@@ -211,6 +217,7 @@ fun Application.testAuthModule(googleTokenVerifier: GoogleTokenVerifier, storage
     routing {
         route("/api") {
             authRoutes()
+            userRoutes()
         }
     }
 }

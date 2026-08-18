@@ -6,6 +6,7 @@ import com.revio.server.core.util.getUuidClaim
 import com.revio.server.core.util.toUuidOrNull
 import com.revio.server.features.auth.JwtService
 import com.revio.server.features.auth.session.ISessionService
+import com.revio.server.features.scoring.ScoringServiceImpl
 import com.revio.server.features.user.dto.CreateUserRequest
 import com.revio.server.features.user.dto.CreateUserResponse
 import com.revio.server.features.user.dto.UpdateProfilePictureRequest
@@ -71,10 +72,11 @@ fun Route.userRoutes() {
                     ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing email"))
 
                 try {
-                    val newUserId = userService.createUserProfile(
+                    val createResult = userService.createUserProfile(
                         authCredentialId = credentialId,
                         user = request.toUser(credentialId),
                     )
+                    val newUserId = createResult.userId
                     val (session, refreshToken) = sessionService.promoteSession(sessionId, newUserId)
                     // A freshly created profile is always UserRole.USER (createUser never sets role,
                     // it relies on the DB default) — re-read anyway so this call site stays uniform
@@ -93,6 +95,13 @@ fun Route.userRoutes() {
                             accessToken = accessToken,
                             refreshToken = refreshToken,
                             userId = newUserId,
+                            isEarlySpotter = createResult.isEarlySpotter,
+                            earlySpotterNumber = createResult.earlySpotterNumber,
+                            earlySpotterBonusPoints = if (createResult.bonusGrantedNow) {
+                                ScoringServiceImpl.EARLY_SPOTTER_BONUS_POINTS
+                            } else {
+                                null
+                            },
                         )
                     )
                 } catch (e: UsernameAlreadyExistsException) {

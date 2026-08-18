@@ -251,7 +251,7 @@ class MigrationV21BackfillTest {
                 username = "newcomer",
                 country = "RO",
             )
-        )
+        ).userId
 
         val newUser = dao.getUserById(newUserId)
         assertEquals(3, newUser?.earlySpotterNumber)

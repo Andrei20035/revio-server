@@ -6,4 +6,5 @@ val waitlistModule = module {
     single<IWaitlistDAO> { WaitlistDAO() }
     single<ISupabaseWaitlistClient> { SupabaseWaitlistClient() }
     single<IWaitlistSyncService> { WaitlistSyncService(get(), get()) }
+    single<IWaitlistLookupService> { WaitlistLookupService(get(), get()) }
 }

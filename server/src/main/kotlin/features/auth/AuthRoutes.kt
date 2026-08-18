@@ -17,6 +17,8 @@ import com.revio.server.features.auth.dto.UpdatePasswordRequest
 import com.revio.server.core.util.getUuidClaim
 import com.revio.server.features.auth.dto.AuthResponse
 import com.revio.server.features.auth.dto.OnboardingStep
+import com.revio.server.features.auth.dto.WaitlistPrefillDTO
+import com.revio.server.features.auth.dto.WaitlistUsernameStatus
 import com.revio.server.features.auth.session.ISessionService
 import com.revio.server.features.auth.session.IAuthSessionDAO
 import com.revio.server.features.auth.session.RefreshTokenConsumedException
@@ -31,6 +33,8 @@ import com.revio.server.features.user.BanState
 import com.revio.server.features.user.IUserDAO
 import com.revio.server.features.user.IUserService
 import com.revio.server.features.user.UserRole
+import com.revio.server.features.user.UsernameAvailabilityResult
+import com.revio.server.features.waitlist.IWaitlistLookupService
 import features.like.ILikeDAO
 import io.ktor.http.*
 import io.ktor.server.auth.*
@@ -53,6 +57,7 @@ fun Route.authRoutes() {
     val likeDao: ILikeDAO by application.inject()
     val leaderboardService: ILeaderboardService by application.inject()
     val accountDeletionService: IAccountDeletionService by application.inject()
+    val waitlistLookupService: IWaitlistLookupService by application.inject()
 
     route("/auth") {
         post("/register") {
@@ -121,6 +126,19 @@ fun Route.authRoutes() {
 
             try {
                 val credentialId = authService.createCredentials(authCredential)
+
+                // Register always creates a brand new credential, so this is always the "new
+                // account" case. WaitlistLookupService.lookup() never throws, so this can never
+                // fail registration.
+                val waitlistEntry = waitlistLookupService.lookup(authCredential.email)
+                val waitlistPrefill = waitlistEntry?.let { entry ->
+                    val usernameCheck = userService.checkUsernameAvailabilityForNewUser(entry.username.orEmpty())
+                    WaitlistPrefillDTO(
+                        suggestedUsername = entry.username,
+                        suggestedUsernameStatus = usernameCheck.toWaitlistUsernameStatus(),
+                    )
+                }
+
                 val (session, refreshToken) = sessionService.createSession(
                     credentialId = credentialId,
                     scope = SessionScope.ONBOARDING,
@@ -144,7 +162,8 @@ fun Route.authRoutes() {
                         refreshToken = refreshToken,
                         expiresIn = JwtService.EXPIRES_IN_SECONDS,
                         scope = session.scope.name,
-                        onboardingStep = OnboardingStep.PROFILE_REQUIRED
+                        onboardingStep = OnboardingStep.PROFILE_REQUIRED,
+                        waitlist = waitlistPrefill,
                     )
                 )
             } catch (e: IllegalArgumentException) {
@@ -235,7 +254,8 @@ fun Route.authRoutes() {
                         refreshToken = refreshToken,
                         expiresIn = JwtService.EXPIRES_IN_SECONDS,
                         scope = session.scope.name,
-                        onboardingStep = onboardingStep
+                        onboardingStep = onboardingStep,
+                        waitlist = result.waitlist,
                     )
                 )
             } else {
@@ -512,6 +532,16 @@ private fun banSuspensionMessage(banState: BanState): String {
     return "Your account has been suspended $durationClause.$reasonClause " +
         "Contact threvioapp@gmail.com if you believe this is a mistake."
 }
+
+/** Also used by [AuthService.googleLogin] to build the Google new-account waitlist prefill. */
+internal fun UsernameAvailabilityResult.toWaitlistUsernameStatus(): WaitlistUsernameStatus =
+    when {
+        available -> WaitlistUsernameStatus.AVAILABLE
+        reason == "TAKEN" -> WaitlistUsernameStatus.TAKEN
+        reason == "TOO_SHORT" -> WaitlistUsernameStatus.TOO_SHORT
+        reason == "TOO_LONG" -> WaitlistUsernameStatus.TOO_LONG
+        else -> WaitlistUsernameStatus.INVALID_FORMAT
+    }
 
 private fun isValidEmail(email: String): Boolean {
     val emailRegex = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")

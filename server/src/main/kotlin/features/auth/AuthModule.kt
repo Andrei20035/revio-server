@@ -13,7 +13,7 @@ val authModule = module {
     single { RefreshTokenGenerator() }
     single<ISessionService> { SessionService(get(), get()) }
     single<GoogleTokenVerifier> { GoogleTokenVerifierImpl() }
-    single<IAuthService> { AuthService(get(), get(), get()) }
+    single<IAuthService> { AuthService(get(), get(), get(), get()) }
 
     single {
         val secret = System.getenv("JWT_SECRET")

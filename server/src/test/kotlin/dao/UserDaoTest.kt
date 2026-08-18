@@ -47,7 +47,7 @@ class UserDaoTest {
         val credential = UserTestSeed.seedAuthCredential("alice@example.com")
         val user = UserTestSeed.buildUser(credential.authCredentialId, username = "alice")
 
-        val userId = dao.createUser(user)
+        val userId = dao.createUser(user).userId
 
         assertNotNull(userId)
         val stored = dao.getUserById(userId)

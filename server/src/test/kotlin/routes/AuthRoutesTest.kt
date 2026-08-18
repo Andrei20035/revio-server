@@ -19,6 +19,7 @@ import com.revio.server.features.auth.dto.RefreshRequest
 import com.revio.server.features.auth.dto.RegisterRequest
 import com.revio.server.features.auth.dto.SessionDTO
 import com.revio.server.features.auth.dto.UpdatePasswordRequest
+import com.revio.server.features.auth.dto.WaitlistUsernameStatus
 import com.revio.server.features.auth.session.AuthSessionDAO
 import com.revio.server.features.auth.session.SessionScope
 import com.revio.server.features.auth.session.SessionService
@@ -26,6 +27,8 @@ import com.revio.server.features.auth.session.SessionStatus
 import com.revio.server.features.post.PostTable
 import com.revio.server.features.user.UserTable
 import com.revio.server.features.user_car.UserCarTable
+import com.revio.server.features.waitlist.IWaitlistLookupService
+import com.revio.server.features.waitlist.WaitlistEntry
 import com.revio.server.core.error.AuthErrorCode
 import com.revio.server.core.error.AuthErrorResponse
 import io.ktor.client.call.*
@@ -39,6 +42,8 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.insert
+import io.mockk.coEvery
+import io.mockk.mockk
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -58,6 +63,8 @@ import testutils.UserTestSeed
 import testutils.setTestEnv
 import testutils.stopKoinSafely
 import testutils.testAuthModule
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import java.util.UUID
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -116,11 +123,12 @@ class AuthRoutesTest {
     // ---- helper: rulează un test in-app cu DB real + verifier fake ----
     private fun authTest(
         storage: IStorageService? = null,
+        waitlistLookupService: IWaitlistLookupService = mockk(relaxed = true),
         block: suspend ApplicationTestBuilder.(io.ktor.client.HttpClient) -> Unit,
     ) =
         testApplication {
             application {
-                testAuthModule(googleVerifier, storage)
+                testAuthModule(googleVerifier, storage, waitlistLookupService)
             }
             val client = createClient {
                 install(ContentNegotiation) {
@@ -262,6 +270,159 @@ class AuthRoutesTest {
             assertNotNull(stored)
             assertNotEquals("Passw0rd!", stored!!.password)
             assertTrue(stored.password!!.startsWith("$2"), "expected BCrypt hash")
+        }
+    }
+
+    // ---- REGISTER: waitlist prefill ----
+
+    private fun fakeWaitlistEntry(username: String?) = WaitlistEntry(
+        id = UUID.randomUUID(),
+        email = "waitlisted@example.com",
+        emailNormalized = "waitlisted@example.com",
+        username = username,
+        platform = "ios",
+        country = "RO",
+        sourceCreatedAt = OffsetDateTime.now(ZoneOffset.UTC),
+        sourceUpdatedAt = OffsetDateTime.now(ZoneOffset.UTC),
+        syncedAt = OffsetDateTime.now(ZoneOffset.UTC),
+    )
+
+    @Test
+    fun `register with an email found in the waitlist returns waitlist suggestedUsername`() = runTest {
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+        coEvery { waitlistLookupService.lookup("waitlisted@example.com") } returns fakeWaitlistEntry("coolname")
+
+        authTest(waitlistLookupService = waitlistLookupService) { client ->
+            val resp = client.post("/api/auth/register") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest("waitlisted@example.com", "Passw0rd!", AuthProvider.REGULAR))
+            }
+
+            assertEquals(HttpStatusCode.Created, resp.status)
+            val body = resp.body<AuthResponse>()
+            assertNotNull(body.waitlist)
+            assertEquals("coolname", body.waitlist!!.suggestedUsername)
+            assertEquals(WaitlistUsernameStatus.AVAILABLE, body.waitlist!!.suggestedUsernameStatus)
+        }
+    }
+
+    @Test
+    fun `register with an email not in the waitlist returns waitlist null`() = runTest {
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+        coEvery { waitlistLookupService.lookup("unknown@example.com") } returns null
+
+        authTest(waitlistLookupService = waitlistLookupService) { client ->
+            val resp = client.post("/api/auth/register") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest("unknown@example.com", "Passw0rd!", AuthProvider.REGULAR))
+            }
+
+            assertEquals(HttpStatusCode.Created, resp.status)
+            val body = resp.body<AuthResponse>()
+            assertNull(body.waitlist)
+        }
+    }
+
+    @Test
+    fun `register with a waitlist username already taken by another user reports TAKEN and 409, not 500`() = runTest {
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+        coEvery { waitlistLookupService.lookup("waitlisted@example.com") } returns fakeWaitlistEntry("existinguser")
+
+        authTest(waitlistLookupService = waitlistLookupService) { client ->
+            // Seed an existing user with the username the waitlist will suggest.
+            val takenResp = client.post("/api/auth/register") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest("first@example.com", "Passw0rd!", AuthProvider.REGULAR))
+            }
+            assertEquals(HttpStatusCode.Created, takenResp.status)
+            val takenBody = takenResp.body<AuthResponse>()
+            client.post("/api/users") {
+                header(HttpHeaders.Authorization, "Bearer ${takenBody.accessToken}")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """{"fullName":"Existing User","birthDate":"1995-01-01","username":"existinguser","country":"RO"}"""
+                )
+            }
+
+            // Register the waitlisted email — the suggestion collides with the user just created.
+            val resp = client.post("/api/auth/register") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest("waitlisted@example.com", "Passw0rd!", AuthProvider.REGULAR))
+            }
+            assertEquals(HttpStatusCode.Created, resp.status)
+            val body = resp.body<AuthResponse>()
+            assertNotNull(body.waitlist)
+            assertEquals(WaitlistUsernameStatus.TAKEN, body.waitlist!!.suggestedUsernameStatus)
+
+            val createResp = client.post("/api/users") {
+                header(HttpHeaders.Authorization, "Bearer ${body.accessToken}")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """{"fullName":"Waitlisted User","birthDate":"1995-01-01","username":"existinguser","country":"RO"}"""
+                )
+            }
+            assertEquals(HttpStatusCode.Conflict, createResp.status)
+        }
+    }
+
+    @Test
+    fun `register with a waitlist username violating the format rules reports INVALID_FORMAT and 400 at creation`() = runTest {
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+        coEvery { waitlistLookupService.lookup("waitlisted@example.com") } returns fakeWaitlistEntry("Bad Name!")
+
+        authTest(waitlistLookupService = waitlistLookupService) { client ->
+            val resp = client.post("/api/auth/register") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest("waitlisted@example.com", "Passw0rd!", AuthProvider.REGULAR))
+            }
+            assertEquals(HttpStatusCode.Created, resp.status)
+            val body = resp.body<AuthResponse>()
+            assertNotNull(body.waitlist)
+            assertEquals(WaitlistUsernameStatus.INVALID_FORMAT, body.waitlist!!.suggestedUsernameStatus)
+
+            val createResp = client.post("/api/users") {
+                header(HttpHeaders.Authorization, "Bearer ${body.accessToken}")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """{"fullName":"Waitlisted User","birthDate":"1995-01-01","username":"Bad Name!","country":"RO"}"""
+                )
+            }
+            assertEquals(HttpStatusCode.BadRequest, createResp.status)
+        }
+    }
+
+    @Test
+    fun `two users registering with the same waitlist-suggested username - first succeeds, second gets 409`() = runTest {
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+        coEvery { waitlistLookupService.lookup(any()) } returns fakeWaitlistEntry("popularname")
+
+        authTest(waitlistLookupService = waitlistLookupService) { client ->
+            val firstAuth = client.post("/api/auth/register") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest("first-user@example.com", "Passw0rd!", AuthProvider.REGULAR))
+            }.body<AuthResponse>()
+            val secondAuth = client.post("/api/auth/register") {
+                contentType(ContentType.Application.Json)
+                setBody(RegisterRequest("second-user@example.com", "Passw0rd!", AuthProvider.REGULAR))
+            }.body<AuthResponse>()
+
+            val firstCreate = client.post("/api/users") {
+                header(HttpHeaders.Authorization, "Bearer ${firstAuth.accessToken}")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """{"fullName":"First User","birthDate":"1995-01-01","username":"popularname","country":"RO"}"""
+                )
+            }
+            val secondCreate = client.post("/api/users") {
+                header(HttpHeaders.Authorization, "Bearer ${secondAuth.accessToken}")
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """{"fullName":"Second User","birthDate":"1995-01-01","username":"popularname","country":"RO"}"""
+                )
+            }
+
+            assertEquals(HttpStatusCode.Created, firstCreate.status)
+            assertEquals(HttpStatusCode.Conflict, secondCreate.status)
         }
     }
 

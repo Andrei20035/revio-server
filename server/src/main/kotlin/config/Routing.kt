@@ -1,6 +1,7 @@
 package com.revio.server.config
 
 import com.revio.server.features.activity.activityRoutes
+import com.revio.server.features.announcement.announcementRoutes
 import com.revio.server.features.auth.authRoutes
 import com.revio.server.features.car_family.carFamilyAdminRoutes
 import com.revio.server.features.car_model.carModelRoutes
@@ -38,6 +39,7 @@ fun Application.configureRouting() {
         // API routes
         route("/api") {
             activityRoutes()
+            announcementRoutes()
             authRoutes()
             carFamilyAdminRoutes()
             carModelRoutes()

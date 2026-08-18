@@ -10,6 +10,7 @@ import com.revio.server.features.auth.GoogleUser
 import com.revio.server.features.auth.IAuthDAO
 import com.revio.server.features.user.IUserService
 import com.revio.server.features.user.dto.UserDTO
+import com.revio.server.features.waitlist.IWaitlistLookupService
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -29,8 +30,9 @@ class AuthServiceTest {
     private fun newService(
         dao: IAuthDAO = mockk(relaxed = true),
         userService: IUserService = mockk(relaxed = true),
-        verifier: GoogleTokenVerifier = mockk(relaxed = true)
-    ): AuthService = AuthService(dao, userService, verifier)
+        verifier: GoogleTokenVerifier = mockk(relaxed = true),
+        waitlistLookupService: IWaitlistLookupService = mockk(relaxed = true),
+    ): AuthService = AuthService(dao, userService, verifier, waitlistLookupService)
 
     // ---------- createCredentials ----------
 
@@ -357,6 +359,75 @@ class AuthServiceTest {
         val service = newService(dao = dao, verifier = verifier)
         val dto = service.googleLogin("valid-token")
         assertNull(dto)
+    }
+
+    @Test
+    fun `googleLogin on a new account looks up the waitlist with the normalized email`() = runTest {
+        val dao = mockk<IAuthDAO>()
+        val verifier = mockk<GoogleTokenVerifier>()
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+
+        coEvery { verifier.verify(any()) } returns GoogleUser(
+            email = "foo@bar.com",
+            googleId = "gid-new"
+        )
+        coEvery { dao.getCredentialsForLogin("foo@bar.com") } returns null
+        coEvery { dao.createCredentials(any()) } returns UUID.randomUUID()
+
+        val service = newService(dao = dao, verifier = verifier, waitlistLookupService = waitlistLookupService)
+        service.googleLogin("valid-token")
+
+        coVerify(exactly = 1) { waitlistLookupService.lookup("foo@bar.com") }
+    }
+
+    @Test
+    fun `googleLogin on an existing matching GOOGLE account does not look up the waitlist`() = runTest {
+        val dao = mockk<IAuthDAO>()
+        val userService = mockk<IUserService>(relaxed = true)
+        val verifier = mockk<GoogleTokenVerifier>()
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+
+        coEvery { verifier.verify(any()) } returns GoogleUser(email = "bob@example.com", googleId = "gid-1")
+        coEvery { dao.getCredentialsForLogin("bob@example.com") } returns AuthCredential(
+            id = UUID.randomUUID(),
+            email = "bob@example.com",
+            password = null,
+            provider = AuthProvider.GOOGLE,
+            googleId = "gid-1"
+        )
+
+        val service = newService(
+            dao = dao,
+            userService = userService,
+            verifier = verifier,
+            waitlistLookupService = waitlistLookupService,
+        )
+        service.googleLogin("valid-token")
+
+        coVerify(exactly = 0) { waitlistLookupService.lookup(any()) }
+    }
+
+    @Test
+    fun `googleLogin on an email already registered with password login does not look up the waitlist`() = runTest {
+        val dao = mockk<IAuthDAO>()
+        val verifier = mockk<GoogleTokenVerifier>()
+        val waitlistLookupService = mockk<IWaitlistLookupService>(relaxed = true)
+
+        coEvery { verifier.verify(any()) } returns GoogleUser(email = "alice@example.com", googleId = "gid-999")
+        coEvery { dao.getCredentialsForLogin("alice@example.com") } returns AuthCredential(
+            id = UUID.randomUUID(),
+            email = "alice@example.com",
+            password = "hashed",
+            provider = AuthProvider.REGULAR,
+            googleId = null
+        )
+
+        val service = newService(dao = dao, verifier = verifier, waitlistLookupService = waitlistLookupService)
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { service.googleLogin("valid-token") }
+        }
+
+        coVerify(exactly = 0) { waitlistLookupService.lookup(any()) }
     }
 
     // ---------- updatePassword ----------

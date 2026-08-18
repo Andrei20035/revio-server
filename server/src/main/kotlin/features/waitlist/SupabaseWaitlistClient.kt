@@ -44,6 +44,16 @@ interface ISupabaseWaitlistClient {
      * layer that can decide what "give up" means for a reconciliation run.
      */
     suspend fun fetchPage(since: OffsetDateTime?, offset: Int, limit: Int): List<WaitlistUpsertRow>
+
+    /**
+     * Point lookup for [WaitlistLookupService]'s live-lookup fallback: fetches at most one row
+     * whose `email` case-insensitively matches [normalizedEmail] (already trim+lowercased by the
+     * caller). Supabase's raw table has no generated `email_normalized` column of its own — this
+     * uses PostgREST's `ilike` filter (without wildcards, so it behaves as an exact
+     * case-insensitive match) as the closest available equivalent. Single attempt, no retry —
+     * the caller applies its own timeout and circuit breaker.
+     */
+    suspend fun fetchByEmail(normalizedEmail: String): WaitlistUpsertRow?
 }
 
 /**
@@ -62,11 +72,15 @@ class SupabaseWaitlistClient(
 
     private val json = Json { ignoreUnknownKeys = true }
 
+    private fun requireBaseUrl(): String = supabaseUrlProvider()?.trimEnd('/')
+        ?: throw IllegalStateException("SUPABASE_URL is not set")
+
+    private fun requireServiceRoleKey(): String = serviceRoleKeyProvider()
+        ?: throw IllegalStateException("SUPABASE_SERVICE_ROLE_KEY is not set")
+
     override suspend fun fetchPage(since: OffsetDateTime?, offset: Int, limit: Int): List<WaitlistUpsertRow> {
-        val baseUrl = supabaseUrlProvider()?.trimEnd('/')
-            ?: throw IllegalStateException("SUPABASE_URL is not set")
-        val serviceRoleKey = serviceRoleKeyProvider()
-            ?: throw IllegalStateException("SUPABASE_SERVICE_ROLE_KEY is not set")
+        val baseUrl = requireBaseUrl()
+        val serviceRoleKey = requireServiceRoleKey()
 
         val response = httpClient.get("$baseUrl/rest/v1/waitlist_signups") {
             headers {
@@ -88,5 +102,27 @@ class SupabaseWaitlistClient(
 
         val records = json.decodeFromString<List<SupabaseWaitlistRecordDto>>(response.bodyAsText())
         return records.map { it.toUpsertRow() }
+    }
+
+    override suspend fun fetchByEmail(normalizedEmail: String): WaitlistUpsertRow? {
+        val baseUrl = requireBaseUrl()
+        val serviceRoleKey = requireServiceRoleKey()
+
+        val response = httpClient.get("$baseUrl/rest/v1/waitlist_signups") {
+            headers {
+                append("apikey", serviceRoleKey)
+                append(HttpHeaders.Authorization, "Bearer $serviceRoleKey")
+            }
+            parameter("select", "id,email,username,platform,country,created_at,updated_at")
+            parameter("email", "ilike.$normalizedEmail")
+            parameter("limit", "1")
+        }
+
+        if (!response.status.isSuccess()) {
+            throw IllegalStateException("Supabase waitlist lookup failed with status ${response.status}")
+        }
+
+        val records = json.decodeFromString<List<SupabaseWaitlistRecordDto>>(response.bodyAsText())
+        return records.firstOrNull()?.toUpsertRow()
     }
 }

@@ -2,12 +2,16 @@ package com.revio.server.features.auth
 
 import at.favre.lib.crypto.bcrypt.BCrypt
 import com.revio.server.features.auth.dto.AuthDTO
+import com.revio.server.features.auth.dto.WaitlistPrefillDTO
 import com.revio.server.features.auth.dto.toDTO
 import com.revio.server.features.user.IUserService
+import com.revio.server.features.waitlist.IWaitlistLookupService
 import com.google.api.client.googleapis.auth.oauth2.GoogleIdToken
 import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier
 import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.json.gson.GsonFactory
+import org.slf4j.LoggerFactory
+import java.security.MessageDigest
 import java.util.*
 
 data class GoogleUser(
@@ -59,8 +63,13 @@ interface IAuthService {
 class AuthService(
     private val authDao: IAuthDAO,
     private val userService: IUserService,
-    private val googleTokenVerifier: GoogleTokenVerifier = GoogleTokenVerifierImpl()
+    private val googleTokenVerifier: GoogleTokenVerifier = GoogleTokenVerifierImpl(),
+    private val waitlistLookupService: IWaitlistLookupService,
 ) : IAuthService {
+
+    companion object {
+        private val logger = LoggerFactory.getLogger(AuthService::class.java)
+    }
 
     override suspend fun createCredentials(authCredential: AuthCredential): UUID {
         val normalizedEmail = authCredential.email.trim().lowercase()
@@ -128,21 +137,21 @@ class AuthService(
     }
 
     override suspend fun googleLogin(googleIdToken: String): AuthDTO? {
-        println("googleLogin called")
-        println("googleLogin token exists: ${googleIdToken.isNotBlank()}")
+        logger.debug("googleLogin called, token present={}", googleIdToken.isNotBlank())
 
         val googleUser = googleTokenVerifier.verify(googleIdToken)
             ?: return null
 
-        println("googleLogin verified: ${googleUser != null}")
-        println("googleLogin email: ${googleUser?.email}")
-        println("googleLogin googleId exists: ${!googleUser?.googleId.isNullOrBlank()}")
+        logger.debug("googleLogin verified, email={}", hashEmailForLogging(googleUser.email))
 
         val existingCredential = authDao.getCredentialsForLogin(googleUser.email)
 
-        println("existingCredential exists: ${existingCredential != null}")
-        println("existingCredential provider: ${existingCredential?.provider}")
-        println("existingCredential googleId matches: ${existingCredential?.googleId == googleUser.googleId}")
+        logger.debug(
+            "googleLogin existingCredential exists={}, provider={}, googleIdMatches={}",
+            existingCredential != null,
+            existingCredential?.provider,
+            existingCredential?.googleId == googleUser.googleId,
+        )
 
         return when {
             existingCredential != null &&
@@ -157,6 +166,18 @@ class AuthService(
             }
 
             existingCredential == null -> {
+                // New Google account — same waitlist recognition contract as email/password
+                // registration (AuthRoutes.kt /register). WaitlistLookupService.lookup() never
+                // throws, so this can never fail the login.
+                val waitlistEntry = waitlistLookupService.lookup(googleUser.email)
+                val waitlistPrefill = waitlistEntry?.let { entry ->
+                    val usernameCheck = userService.checkUsernameAvailabilityForNewUser(entry.username.orEmpty())
+                    WaitlistPrefillDTO(
+                        suggestedUsername = entry.username,
+                        suggestedUsernameStatus = usernameCheck.toWaitlistUsernameStatus(),
+                    )
+                }
+
                 val newCredential = AuthCredential(
                     email = googleUser.email,
                     password = null,
@@ -166,11 +187,17 @@ class AuthService(
 
                 val credentialId = createCredentials(newCredential)
 
-                newCredential.copy(id = credentialId).toDTO()
+                newCredential.copy(id = credentialId).toDTO(waitlist = waitlistPrefill)
             }
 
             else -> null
         }
+    }
+
+    /** Truncated SHA-256 of the email — never log emails in clear text. */
+    private fun hashEmailForLogging(email: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(email.toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }.take(12)
     }
 
     override suspend fun updatePassword(credentialId: UUID, oldPassword: String, newPassword: String): Int {

@@ -89,7 +89,12 @@ class UserServiceTest {
         val capturedUser = slot<com.revio.server.features.user.User>()
         coEvery { dao.getUserByAuthCredentialId(authCredentialId) } returns null
         coEvery { dao.usernameExistsIgnoreCase("alice_1") } returns false
-        coEvery { dao.createUser(capture(capturedUser)) } returns UUID.randomUUID()
+        coEvery { dao.createUser(capture(capturedUser)) } returns com.revio.server.features.user.CreateUserProfileResult(
+            userId = UUID.randomUUID(),
+            isEarlySpotter = false,
+            earlySpotterNumber = null,
+            bonusGrantedNow = false,
+        )
 
         val service = newService(dao)
         service.createUserProfile(authCredentialId, UserTestSeed.buildUser(authCredentialId, username = "  Alice_1 "))
@@ -669,5 +674,63 @@ class UserServiceTest {
         assertEquals(false, result.available)
         assertEquals("TOO_SHORT", result.reason)
         coVerify(exactly = 0) { dao.getUserById(any()) }
+    }
+
+    // ---------- checkUsernameAvailabilityForNewUser ----------
+
+    @Test
+    fun `checkUsernameAvailabilityForNewUser returns available for a free username`() = runTest {
+        val dao = mockk<IUserDAO>()
+        coEvery { dao.usernameExistsIgnoreCase("newuser") } returns false
+
+        val result = newService(dao).checkUsernameAvailabilityForNewUser("  NewUser ")
+
+        assertEquals(true, result.available)
+        assertEquals("newuser", result.normalized)
+        assertNull(result.reason)
+    }
+
+    @Test
+    fun `checkUsernameAvailabilityForNewUser returns TAKEN for a username already in use`() = runTest {
+        val dao = mockk<IUserDAO>()
+        coEvery { dao.usernameExistsIgnoreCase("bob") } returns true
+
+        val result = newService(dao).checkUsernameAvailabilityForNewUser("bob")
+
+        assertEquals(false, result.available)
+        assertEquals("TAKEN", result.reason)
+    }
+
+    @Test
+    fun `checkUsernameAvailabilityForNewUser flags invalid characters without querying the DAO`() = runTest {
+        val dao = mockk<IUserDAO>(relaxed = true)
+
+        val result = newService(dao).checkUsernameAvailabilityForNewUser("bad-name")
+
+        assertEquals(false, result.available)
+        assertEquals("INVALID_FORMAT", result.reason)
+        coVerify(exactly = 0) { dao.usernameExistsIgnoreCase(any()) }
+    }
+
+    @Test
+    fun `checkUsernameAvailabilityForNewUser flags a too-short username without querying the DAO`() = runTest {
+        val dao = mockk<IUserDAO>(relaxed = true)
+
+        val result = newService(dao).checkUsernameAvailabilityForNewUser("ab")
+
+        assertEquals(false, result.available)
+        assertEquals("TOO_SHORT", result.reason)
+        coVerify(exactly = 0) { dao.usernameExistsIgnoreCase(any()) }
+    }
+
+    @Test
+    fun `checkUsernameAvailabilityForNewUser flags a blank username without querying the DAO`() = runTest {
+        val dao = mockk<IUserDAO>(relaxed = true)
+
+        val result = newService(dao).checkUsernameAvailabilityForNewUser("   ")
+
+        assertEquals(false, result.available)
+        assertEquals("INVALID_FORMAT", result.reason)
+        coVerify(exactly = 0) { dao.usernameExistsIgnoreCase(any()) }
     }
 }

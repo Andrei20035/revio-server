@@ -7,19 +7,30 @@ import com.revio.server.features.user.dto.UpdateUserRequest
 import com.revio.server.features.user.dto.UserDTO
 import com.revio.server.features.user.dto.toDTO
 import com.revio.server.features.user.dto.toSelfDTO
+import org.jetbrains.exposed.exceptions.ExposedSQLException
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.util.UUID
 
+/** Postgres SQLSTATE for a unique constraint violation. */
+private const val POSTGRES_UNIQUE_VIOLATION = "23505"
+
 interface IUserService {
-    suspend fun createUserProfile(authCredentialId: UUID, user: User): UUID
+    suspend fun createUserProfile(authCredentialId: UUID, user: User): CreateUserProfileResult
     suspend fun getUserById(userId: UUID): UserDTO?
     suspend fun getUserByAuthCredentialId(authCredentialId: UUID): UserDTO?
     suspend fun updateProfilePicture(userId: UUID, imagePath: String): UserDTO
     suspend fun getSelf(userId: UUID): SelfUserDTO?
     suspend fun updateUserProfile(userId: UUID, request: UpdateUserRequest): SelfUserDTO
     suspend fun checkUsernameAvailability(userId: UUID, username: String): UsernameAvailabilityResult
+
+    /**
+     * Same validation and availability rules as [checkUsernameAvailability], for a username
+     * suggested before any profile exists yet (the waitlist prefill at registration) — there is
+     * no user to exclude from the uniqueness check.
+     */
+    suspend fun checkUsernameAvailabilityForNewUser(username: String): UsernameAvailabilityResult
 }
 
 data class UsernameAvailabilityResult(
@@ -42,7 +53,7 @@ class UserService(
         private val monthlyChangeCooldown: Duration = profileChangeCooldown
     }
 
-    override suspend fun createUserProfile(authCredentialId: UUID, user: User): UUID {
+    override suspend fun createUserProfile(authCredentialId: UUID, user: User): CreateUserProfileResult {
         require(user.authCredentialId == authCredentialId) { "authCredentialId mismatch" }
         if (userDao.getUserByAuthCredentialId(authCredentialId) != null) {
             throw UserProfileAlreadyExistsException("Profile already exists for this account")
@@ -55,12 +66,23 @@ class UserService(
 
         val sanitizedProfilePicture = normalizeOptionalImagePath(user.profilePicturePath)
 
-        return userDao.createUser(
-            user.copy(
-                username = normalizedUsername,
-                profilePicturePath = sanitizedProfilePicture,
+        // The pre-check above closes most collisions cheaply, but two concurrent registrations
+        // can both pass it before either commits — the DB-level unique index is the real
+        // guarantee. Translate that race loss into the same exception the pre-check throws,
+        // instead of letting a raw ExposedSQLException surface as a 500.
+        return try {
+            userDao.createUser(
+                user.copy(
+                    username = normalizedUsername,
+                    profilePicturePath = sanitizedProfilePicture,
+                )
             )
-        )
+        } catch (e: ExposedSQLException) {
+            if (e.sqlState == POSTGRES_UNIQUE_VIOLATION && e.message?.contains("idx_users_username_lower") == true) {
+                throw UsernameAlreadyExistsException("Username is already taken")
+            }
+            throw e
+        }
     }
 
     override suspend fun getUserById(userId: UUID): UserDTO? {
@@ -178,7 +200,33 @@ class UserService(
 
     override suspend fun checkUsernameAvailability(userId: UUID, username: String): UsernameAvailabilityResult {
         val trimmedLower = username.trim().lowercase()
+        validateUsernameFormat(trimmedLower)?.let { return it }
 
+        val currentUser = userDao.getUserById(userId)
+        if (currentUser != null && currentUser.username.lowercase() == trimmedLower) {
+            return UsernameAvailabilityResult(available = true, normalized = trimmedLower, reason = null)
+        }
+
+        if (userDao.usernameExistsIgnoreSelf(trimmedLower, userId)) {
+            return UsernameAvailabilityResult(available = false, normalized = trimmedLower, reason = "TAKEN")
+        }
+
+        return UsernameAvailabilityResult(available = true, normalized = trimmedLower, reason = null)
+    }
+
+    override suspend fun checkUsernameAvailabilityForNewUser(username: String): UsernameAvailabilityResult {
+        val trimmedLower = username.trim().lowercase()
+        validateUsernameFormat(trimmedLower)?.let { return it }
+
+        if (userDao.usernameExistsIgnoreCase(trimmedLower)) {
+            return UsernameAvailabilityResult(available = false, normalized = trimmedLower, reason = "TAKEN")
+        }
+
+        return UsernameAvailabilityResult(available = true, normalized = trimmedLower, reason = null)
+    }
+
+    /** Shared format checks for both [checkUsernameAvailability] and [checkUsernameAvailabilityForNewUser]. */
+    private fun validateUsernameFormat(trimmedLower: String): UsernameAvailabilityResult? {
         if (trimmedLower.isBlank()) {
             return UsernameAvailabilityResult(available = false, normalized = trimmedLower, reason = "INVALID_FORMAT")
         }
@@ -191,17 +239,7 @@ class UserService(
         if (!usernameRegex.matches(trimmedLower)) {
             return UsernameAvailabilityResult(available = false, normalized = trimmedLower, reason = "INVALID_FORMAT")
         }
-
-        val currentUser = userDao.getUserById(userId)
-        if (currentUser != null && currentUser.username.lowercase() == trimmedLower) {
-            return UsernameAvailabilityResult(available = true, normalized = trimmedLower, reason = null)
-        }
-
-        if (userDao.usernameExistsIgnoreSelf(trimmedLower, userId)) {
-            return UsernameAvailabilityResult(available = false, normalized = trimmedLower, reason = "TAKEN")
-        }
-
-        return UsernameAvailabilityResult(available = true, normalized = trimmedLower, reason = null)
+        return null
     }
 
     private fun normalizeUsername(username: String): String {

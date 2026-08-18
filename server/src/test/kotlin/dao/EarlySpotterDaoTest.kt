@@ -78,7 +78,7 @@ class EarlySpotterDaoTest {
     @Test
     fun `first createUser after migration receives earlySpotterNumber 1`() = runTest {
         val cred = UserTestSeed.seedAuthCredential("first@example.com")
-        val userId = dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "first"))
+        val userId = dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "first")).userId
 
         val user = dao.getUserById(userId)
 
@@ -95,7 +95,7 @@ class EarlySpotterDaoTest {
         dao.createUser(UserTestSeed.buildUser(cred1.authCredentialId, username = "first"))
 
         val cred2 = UserTestSeed.seedAuthCredential("second@example.com")
-        val userId2 = dao.createUser(UserTestSeed.buildUser(cred2.authCredentialId, username = "second"))
+        val userId2 = dao.createUser(UserTestSeed.buildUser(cred2.authCredentialId, username = "second")).userId
 
         val user2 = dao.getUserById(userId2)
 
@@ -110,7 +110,7 @@ class EarlySpotterDaoTest {
     fun `first 1000 createUser calls receive numbers 1 to 1000 all distinct`() = runTest {
         val numbers = (1..1000).map { i ->
             val cred = UserTestSeed.seedAuthCredential("user$i@example.com")
-            val userId = dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "user$i"))
+            val userId = dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "user$i")).userId
             dao.getUserById(userId)!!.earlySpotterNumber
         }
 
@@ -128,7 +128,7 @@ class EarlySpotterDaoTest {
         }
 
         val lateCred = UserTestSeed.seedAuthCredential("late@example.com")
-        val lateUserId = dao.createUser(UserTestSeed.buildUser(lateCred.authCredentialId, username = "late"))
+        val lateUserId = dao.createUser(UserTestSeed.buildUser(lateCred.authCredentialId, username = "late")).userId
         val lateUser = dao.getUserById(lateUserId)
 
         assertNotNull(lateUser)
@@ -149,7 +149,7 @@ class EarlySpotterDaoTest {
             credentials.mapIndexed { i, cred ->
                 async {
                     dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "concurrent$i"))
-                        .let { userId -> dao.getUserById(userId)!!.earlySpotterNumber }
+                        .let { result -> dao.getUserById(result.userId)!!.earlySpotterNumber }
                 }
             }.awaitAll()
         }
@@ -171,7 +171,7 @@ class EarlySpotterDaoTest {
         }
 
         val newCred = UserTestSeed.seedAuthCredential("newcomer@example.com")
-        val newUserId = dao.createUser(UserTestSeed.buildUser(newCred.authCredentialId, username = "newcomer"))
+        val newUserId = dao.createUser(UserTestSeed.buildUser(newCred.authCredentialId, username = "newcomer")).userId
         val newUser = dao.getUserById(newUserId)
 
         assertNotNull(newUser)
@@ -244,7 +244,7 @@ class EarlySpotterDaoTest {
     @Test
     fun `createUser with an available slot writes a ledger entry and grants the 300-point bonus`() = runTest {
         val cred = UserTestSeed.seedAuthCredential("bonus@example.com")
-        val userId = dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "bonus"))
+        val userId = dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "bonus")).userId
 
         val user = dao.getUserById(userId)
         assertNotNull(user)
@@ -274,7 +274,7 @@ class EarlySpotterDaoTest {
         }
 
         val lateCred = UserTestSeed.seedAuthCredential("lateb@example.com")
-        val lateUserId = dao.createUser(UserTestSeed.buildUser(lateCred.authCredentialId, username = "lateb"))
+        val lateUserId = dao.createUser(UserTestSeed.buildUser(lateCred.authCredentialId, username = "lateb")).userId
         val lateUser = dao.getUserById(lateUserId)
 
         assertNotNull(lateUser)
@@ -306,7 +306,7 @@ class EarlySpotterDaoTest {
             val credentials = (1..n).map { i -> UserTestSeed.seedAuthCredential("boundary$i@example.com") }
 
             val userIds = credentials.mapIndexed { i, cred ->
-                async { dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "boundary$i")) }
+                async { dao.createUser(UserTestSeed.buildUser(cred.authCredentialId, username = "boundary$i")).userId }
             }.awaitAll()
 
             val users = userIds.map { dao.getUserById(it)!! }
