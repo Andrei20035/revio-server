@@ -1,8 +1,11 @@
 package com.revio.server
 
+import com.revio.server.config.configureCallId
 import com.revio.server.config.configureDatabases
 import com.revio.server.config.configureAuthStatusPages
 import com.revio.server.config.configureHTTP
+import com.revio.server.config.configureHealth
+import com.revio.server.config.configureMetrics
 import com.revio.server.config.configureMonitoring
 import com.revio.server.config.configureRouting
 import com.revio.server.config.configureSecurity
@@ -83,7 +86,10 @@ fun Application.module() {
     configureSerialization()
     configureAuthStatusPages()
     configureDatabases()
+    configureCallId()
     configureMonitoring()
+    configureMetrics()
+    configureHealth()
     configureSwagger()
     configureRouting()
 

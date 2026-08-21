@@ -127,14 +127,23 @@ class PostServiceImpl(
                     createdAtTimezone = request.createdAtTimezone,
                 )
             )
-            // Award SpotScore and advance streak for camera posts.
-            scoringService.onPostCreated(
-                userId = request.authorId,
-                postId = inserted.id,
-                source = request.source,
-                createdAtUtc = Instant.now(),
-                createdAtTimezone = request.createdAtTimezone,
-            )
+            // Award SpotScore and advance streak for camera posts. Best-effort: postDao.insert
+            // above already committed its own transaction — there is no transaction spanning
+            // insert + scoring — so once the row exists, a scoring failure must never turn an
+            // already-created post into a client-visible failure. That would make the client
+            // retry the upload (pas 3.4a confirmed this) and create a duplicate post. A missed
+            // award is logged for follow-up instead of thrown.
+            runCatching {
+                scoringService.onPostCreated(
+                    userId = request.authorId,
+                    postId = inserted.id,
+                    source = request.source,
+                    createdAtUtc = Instant.now(),
+                    createdAtTimezone = request.createdAtTimezone,
+                )
+            }.onFailure {
+                logger.error("Scoring failed for post {} — post created without points/streak", inserted.id, it)
+            }
 
             // Challenge contribution: evaluated against inserted.createdAt (the value Postgres
             // actually persisted), not a fresh Instant.now(). Best-effort — a failure here must
@@ -156,7 +165,12 @@ class PostServiceImpl(
             inserted.id
         } catch (e: Exception) {
             runCatching { storageService.deleteImage(objectKey) }
-            throw PostCreationException("Failed to create post for user ${request.authorId}", e)
+                .onFailure { deleteError ->
+                    logger.warn("Post creation failed and image cleanup also failed for {}", objectKey, deleteError)
+                    runCatching { orphanedStorageDao.recordFailure(objectKey, deleteError.message) }
+                        .onFailure { logger.error("Failed to queue orphaned storage object {}", objectKey, it) }
+                }
+            throw PostCreationException("Failed to create post for user ${request.authorId}", stage = "insert", cause = e)
         }
     }
 
@@ -435,7 +449,8 @@ class PostServiceImpl(
     }
 }
 
-class PostCreationException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+/** [stage] identifies which step of [PostServiceImpl.createPost] failed — pas 3.4c. */
+class PostCreationException(message: String, val stage: String, cause: Throwable? = null) : RuntimeException(message, cause)
 
 class PostNotFoundException(val postId: UUID) : RuntimeException("Post $postId not found")
 

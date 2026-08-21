@@ -9,6 +9,11 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import org.koin.ktor.ext.inject
 
+/**
+ * Inactive: not called from the Android app (pas 4.4). The endpoints exist in the API and pass
+ * their own tests, but nothing in the client wires up friends/friend-requests today — backlog,
+ * not in scope for closed testing. See revio-server/README.md's Domain Modules table.
+ */
 fun Route.friendRoutes() {
     val friendService: IFriendService by application.inject()
 

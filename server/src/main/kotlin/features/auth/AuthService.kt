@@ -1,6 +1,7 @@
 package com.revio.server.features.auth
 
 import at.favre.lib.crypto.bcrypt.BCrypt
+import com.revio.server.core.util.hashEmailForLogging
 import com.revio.server.features.auth.dto.AuthDTO
 import com.revio.server.features.auth.dto.WaitlistPrefillDTO
 import com.revio.server.features.auth.dto.toDTO
@@ -11,7 +12,6 @@ import com.google.api.client.googleapis.auth.oauth2.GoogleIdTokenVerifier
 import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.json.gson.GsonFactory
 import org.slf4j.LoggerFactory
-import java.security.MessageDigest
 import java.util.*
 
 data class GoogleUser(
@@ -198,12 +198,6 @@ class AuthService(
 
             else -> null
         }
-    }
-
-    /** Truncated SHA-256 of the email — never log emails in clear text. */
-    private fun hashEmailForLogging(email: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(email.toByteArray())
-        return digest.joinToString("") { "%02x".format(it) }.take(12)
     }
 
     override suspend fun updatePassword(credentialId: UUID, oldPassword: String, newPassword: String): Int {

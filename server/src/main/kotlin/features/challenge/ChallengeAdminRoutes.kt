@@ -4,6 +4,8 @@ import com.revio.server.core.serialization.InstantSerializer
 import com.revio.server.core.serialization.UUIDSerializer
 import com.revio.server.core.util.getUuidClaim
 import com.revio.server.core.util.toUuidOrNull
+import com.revio.server.features.post.IPostDAO
+import com.revio.server.features.post.PostSource
 import io.ktor.http.*
 import io.ktor.server.auth.*
 import io.ktor.server.plugins.*
@@ -12,11 +14,14 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 import org.koin.ktor.ext.inject
+import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.format.DateTimeParseException
 import java.util.UUID
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.challenge.ChallengeAdminRoutes")
 
 @Serializable
 data class CreateChallengeAdminRequest(
@@ -58,6 +63,26 @@ data class FinalizeDueResultDTO(
     val grantedRewards: Int,
     val revokedRewards: Int,
 )
+
+/** [evaluated] is false only when no challenge was active at the post's creation time — nothing to reconcile. */
+@Serializable
+data class ReconcilePostResultDTO(
+    val evaluated: Boolean,
+    val eligible: Boolean? = null,
+    val contributionCount: Int? = null,
+    val rewardGranted: Boolean? = null,
+)
+
+private fun ContributionEvaluation?.toReconcileDTO() = if (this == null) {
+    ReconcilePostResultDTO(evaluated = false)
+} else {
+    ReconcilePostResultDTO(
+        evaluated = true,
+        eligible = eligible,
+        contributionCount = contributionCount,
+        rewardGranted = rewardGranted,
+    )
+}
 
 /** One entry of [FinalizationHealthDTO.stuckChallenges] — plan §9-K3. */
 @Serializable
@@ -148,6 +173,8 @@ fun Route.challengeAdminRoutes(
     val challengeService: IChallengeService by application.inject()
     val challengeFinalizationService: IChallengeFinalizationService by application.inject()
     val challengeDao: IChallengeDAO by application.inject()
+    val challengeProgressService: IChallengeProgressService by application.inject()
+    val postDao: IPostDAO by application.inject()
 
     route("/admin/challenges") {
         authenticate("admin") {
@@ -367,6 +394,36 @@ fun Route.challengeAdminRoutes(
                 val result = challengeFinalizationService.finalize(id) ?: FinalizationResult(grantedCount = 0, revokedCount = 0)
                 call.respond(HttpStatusCode.OK, result.toDTO())
             }
+
+            // Recovery path for the best-effort challenge evaluation at post creation (pas 5.10):
+            // PostService.createPost never fails post creation over a challenge-evaluation error
+            // (plan §4.3), which means a transient failure there is otherwise unrecoverable — see
+            // PostService.kt's "recoverable later via the admin reconcile endpoint" comment, which
+            // predates this endpoint actually existing. Re-runs the exact same evaluation the post
+            // would have gotten at creation time; a harmless no-op if it already succeeded.
+            post("/reconcile-post/{postId}") {
+                val postId = call.parameters["postId"].toUuidOrNull()
+                    ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid postId"))
+
+                val post = postDao.findById(postId)
+                    ?: return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "Post not found"))
+
+                val carModelId = post.carModelId
+                if (post.source != PostSource.CAMERA || carModelId == null) {
+                    return@post call.respond(
+                        HttpStatusCode.BadRequest,
+                        mapOf("error" to "Post is not eligible for challenge contribution (not a camera post with a car model)"),
+                    )
+                }
+
+                val evaluation = challengeProgressService.evaluatePostForActiveChallenge(
+                    userId = post.userId,
+                    postId = post.id,
+                    carModelId = carModelId,
+                    postCreatedAt = post.createdAt,
+                )
+                call.respond(HttpStatusCode.OK, evaluation.toReconcileDTO())
+            }
         }
 
         // Dedicated endpoint for the external cron sweep (plan §9-C6) — the authoritative trigger
@@ -387,7 +444,12 @@ fun Route.challengeAdminRoutes(
             var grantedRewards = 0
             var revokedRewards = 0
             for (challenge in challengeDao.findDueForFinalization(now, FINALIZE_DUE_LIMIT)) {
-                val result = challengeFinalizationService.finalize(challenge.id, now) ?: continue
+                val result = try {
+                    challengeFinalizationService.finalize(challenge.id, now) ?: continue
+                } catch (e: Exception) {
+                    logger.error("Finalization failed for challenge {}, sweep continues", challenge.id, e)
+                    continue
+                }
                 finalizedChallenges++
                 grantedRewards += result.grantedCount
                 revokedRewards += result.revokedCount

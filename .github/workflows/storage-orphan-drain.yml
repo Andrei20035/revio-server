@@ -1,0 +1,18 @@
+name: Storage orphan drain
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Retry deletion of queued orphaned storage objects
+        run: |
+          curl -fsS -X POST "$CARSPOTTER_API_URL/api/internal/storage/retry-orphans" \
+               -H "X-Cron-Secret: $CRON_SECRET"
+        env:
+          CARSPOTTER_API_URL: ${{ secrets.CARSPOTTER_API_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

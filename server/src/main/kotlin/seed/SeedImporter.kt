@@ -259,7 +259,7 @@ private fun connectDatabase(env: DotEnv) {
     // Ensure the schema exists (idempotent) so the seeder works without booting the server.
     Flyway.configure().dataSource(dataSource).locations("classpath:db/migrations").load().migrate()
     Database.connect(dataSource)
-    println("Connected to $jdbcUrl (env=$ktorEnv)")
+    println("Connected to database (env=$ktorEnv)")
 }
 
 /** Minimal .env reader: file values fall back to real process env. */

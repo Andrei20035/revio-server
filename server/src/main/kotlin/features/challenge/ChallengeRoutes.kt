@@ -20,7 +20,10 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.launch
 import org.koin.ktor.ext.inject
+import org.slf4j.LoggerFactory
 import java.time.Instant
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.challenge.ChallengeRoutes")
 
 /**
  * [family] must already be resolved by the caller — via [com.revio.server.features.car_family.ICarFamilyService.getFamilies],
@@ -72,10 +75,10 @@ private suspend fun triggerFinalizationCatchUp(
             application.launch {
                 runCatching {
                     due.forEach { challenge -> challengeFinalizationService.finalize(challenge.id, now) }
-                }
+                }.onFailure { logger.error("Background finalization catch-up failed", it) }
             }
         }
-    }
+    }.onFailure { logger.error("Finalization catch-up probe failed", it) }
 }
 
 /**

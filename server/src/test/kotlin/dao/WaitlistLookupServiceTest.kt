@@ -24,6 +24,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import testutils.TestDatabaseFactory
+import testutils.setTestEnv
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.util.UUID
@@ -40,6 +41,9 @@ class WaitlistLookupServiceTest {
 
     @BeforeAll
     fun setup() {
+        // hashEmailForLogging (pas 5.5) is keyed by JWT_SECRET — every lookup() call reaches it
+        // via logOutcome(), not just error paths, so it must be set before any test runs here.
+        setTestEnv()
         TestDatabaseFactory.start()
     }
 

@@ -15,6 +15,7 @@ import com.revio.server.features.auth.dto.RegisterRequest
 import com.revio.server.features.auth.dto.SessionDTO
 import com.revio.server.features.auth.dto.UpdatePasswordRequest
 import com.revio.server.core.util.getUuidClaim
+import com.revio.server.core.util.hashEmailForLogging
 import com.revio.server.features.auth.dto.AuthResponse
 import com.revio.server.features.auth.dto.OnboardingStep
 import com.revio.server.features.auth.dto.WaitlistPrefillDTO
@@ -42,9 +43,13 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import org.koin.ktor.ext.inject
+import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.auth.AuthRoutes")
+private val refreshTokenHasher = RefreshTokenGenerator()
 
 fun Route.authRoutes() {
     val authService: IAuthService by application.inject()
@@ -63,124 +68,10 @@ fun Route.authRoutes() {
         post("/register") {
             val request = call.receive<RegisterRequest>()
 
-            val authCredential = when (request.provider) {
-                AuthProvider.REGULAR -> {
-                    val normalizedEmail = request.email
-                        ?.trim()
-                        ?.lowercase()
-                        ?: throw AuthBadRequestException(
-                            AuthErrorCode.VALIDATION_ERROR,
-                            "Email is required"
-                        )
-
-                    if (normalizedEmail.isBlank() || !isValidEmail(normalizedEmail)) {
-                        throw AuthBadRequestException(
-                            AuthErrorCode.VALIDATION_ERROR,
-                            "Invalid email"
-                        )
-                    }
-
-                    val password = request.password
-                        ?.trim()
-                        ?: throw AuthBadRequestException(
-                            AuthErrorCode.VALIDATION_ERROR,
-                            "Password is required for regular registration"
-                        )
-
-                    if (!isValidPassword(password)) {
-                        throw AuthBadRequestException(
-                            AuthErrorCode.WEAK_PASSWORD,
-                            PASSWORD_REQUIREMENTS_MESSAGE
-                        )
-                    }
-
-                    AuthCredential(
-                        email = normalizedEmail,
-                        password = password,
-                        googleId = null,
-                        provider = AuthProvider.REGULAR
-                    )
-                }
-                AuthProvider.GOOGLE -> {
-                    if (request.googleIdToken.isNullOrBlank()) {
-                        throw AuthBadRequestException(
-                            AuthErrorCode.VALIDATION_ERROR,
-                            "Google ID token is required"
-                        )
-                    }
-
-                    val googleUser = googleTokenVerifier.verify(request.googleIdToken)
-                        ?: throw AuthUnauthorizedException(
-                            AuthErrorCode.INVALID_GOOGLE_TOKEN,
-                            "Invalid Google token"
-                        )
-
-                    AuthCredential(
-                        email = googleUser.email.trim().lowercase(),
-                        password = null,
-                        googleId = googleUser.googleId,
-                        provider = AuthProvider.GOOGLE
-                    )
-                }
-            }
-
             try {
-                val credentialId = authService.createCredentials(authCredential)
-
-                // Register always creates a brand new credential, so this is always the "new
-                // account" case. WaitlistLookupService.lookup() never throws, so this can never
-                // fail registration.
-                val waitlistEntry = waitlistLookupService.lookup(authCredential.email)
-                val waitlistPrefill = waitlistEntry?.let { entry ->
-                    val usernameCheck = userService.checkUsernameAvailabilityForNewUser(entry.username.orEmpty())
-                    WaitlistPrefillDTO(
-                        suggestedUsername = entry.username,
-                        suggestedUsernameStatus = usernameCheck.toWaitlistUsernameStatus(),
-                    )
-                }
-
-                val (session, refreshToken) = sessionService.createSession(
-                    credentialId = credentialId,
-                    scope = SessionScope.ONBOARDING,
-                    deviceId = request.deviceId,
-                    deviceName = request.deviceName,
-                    userAgent = call.request.headers[HttpHeaders.UserAgent],
-                    ip = call.request.local.remoteHost
-                )
-                // No userId exists yet at registration (only the auth credential is created here),
-                // so there is no role to read — isAdmin stays at its false default.
-                val accessToken = jwtService.generateAccessToken(
-                    session = session,
-                    credentialId = credentialId,
-                    email = authCredential.email
-                )
-
-                call.respond(
-                    HttpStatusCode.Created,
-                    AuthResponse(
-                        accessToken = accessToken,
-                        refreshToken = refreshToken,
-                        expiresIn = JwtService.EXPIRES_IN_SECONDS,
-                        scope = session.scope.name,
-                        onboardingStep = OnboardingStep.PROFILE_REQUIRED,
-                        waitlist = waitlistPrefill,
-                    )
-                )
-            } catch (e: IllegalArgumentException) {
-                throw AuthConflictException(
-                    AuthErrorCode.EMAIL_TAKEN,
-                    e.message ?: "Email is already registered"
-                )
-            }
-        }
-
-        post("/login") {
-            val request = call.receive<LoginRequest>()
-
-            val result = try {
-                when (request.provider) {
+                val authCredential = when (request.provider) {
                     AuthProvider.REGULAR -> {
-                        val email = request.email
+                        val normalizedEmail = request.email
                             ?.trim()
                             ?.lowercase()
                             ?: throw AuthBadRequestException(
@@ -188,81 +79,215 @@ fun Route.authRoutes() {
                                 "Email is required"
                             )
 
-                        if (!isValidEmail(email)) {
+                        if (normalizedEmail.isBlank() || !isValidEmail(normalizedEmail)) {
                             throw AuthBadRequestException(
                                 AuthErrorCode.VALIDATION_ERROR,
-                                "Invalid email format"
+                                "Invalid email"
                             )
                         }
 
                         val password = request.password
+                            ?.trim()
                             ?: throw AuthBadRequestException(
                                 AuthErrorCode.VALIDATION_ERROR,
-                                "Password is required"
+                                "Password is required for regular registration"
                             )
-                        authService.regularLogin(email, password)
+
+                        if (!isValidPassword(password)) {
+                            throw AuthBadRequestException(
+                                AuthErrorCode.WEAK_PASSWORD,
+                                PASSWORD_REQUIREMENTS_MESSAGE
+                            )
+                        }
+
+                        AuthCredential(
+                            email = normalizedEmail,
+                            password = password,
+                            googleId = null,
+                            provider = AuthProvider.REGULAR
+                        )
                     }
                     AuthProvider.GOOGLE -> {
-                        val googleIdToken = request.googleIdToken
-                            ?: throw AuthBadRequestException(
+                        if (request.googleIdToken.isNullOrBlank()) {
+                            throw AuthBadRequestException(
                                 AuthErrorCode.VALIDATION_ERROR,
                                 "Google ID token is required"
                             )
-                        authService.googleLogin(googleIdToken)
+                        }
+
+                        val googleUser = googleTokenVerifier.verify(request.googleIdToken)
+                            ?: throw AuthUnauthorizedException(
+                                AuthErrorCode.INVALID_GOOGLE_TOKEN,
+                                "Invalid Google token"
+                            )
+
+                        AuthCredential(
+                            email = googleUser.email.trim().lowercase(),
+                            password = null,
+                            googleId = googleUser.googleId,
+                            provider = AuthProvider.GOOGLE
+                        )
                     }
                 }
-            } catch (e: IllegalArgumentException) {
-                if (e.message?.contains("registered with password login", ignoreCase = true) == true) {
+
+                try {
+                    val credentialId = authService.createCredentials(authCredential)
+
+                    // Register always creates a brand new credential, so this is always the "new
+                    // account" case. WaitlistLookupService.lookup() never throws, so this can never
+                    // fail registration.
+                    val waitlistEntry = waitlistLookupService.lookup(authCredential.email)
+                    val waitlistPrefill = waitlistEntry?.let { entry ->
+                        val usernameCheck = userService.checkUsernameAvailabilityForNewUser(entry.username.orEmpty())
+                        WaitlistPrefillDTO(
+                            suggestedUsername = entry.username,
+                            suggestedUsernameStatus = usernameCheck.toWaitlistUsernameStatus(),
+                        )
+                    }
+
+                    val (session, refreshToken) = sessionService.createSession(
+                        credentialId = credentialId,
+                        scope = SessionScope.ONBOARDING,
+                        deviceId = request.deviceId,
+                        deviceName = request.deviceName,
+                        userAgent = call.request.headers[HttpHeaders.UserAgent],
+                        ip = call.request.local.remoteHost
+                    )
+                    // No userId exists yet at registration (only the auth credential is created here),
+                    // so there is no role to read — isAdmin stays at its false default.
+                    val accessToken = jwtService.generateAccessToken(
+                        session = session,
+                        credentialId = credentialId,
+                        email = authCredential.email
+                    )
+
+                    call.respond(
+                        HttpStatusCode.Created,
+                        AuthResponse(
+                            accessToken = accessToken,
+                            refreshToken = refreshToken,
+                            expiresIn = JwtService.EXPIRES_IN_SECONDS,
+                            scope = session.scope.name,
+                            onboardingStep = OnboardingStep.PROFILE_REQUIRED,
+                            waitlist = waitlistPrefill,
+                        )
+                    )
+                    // Ev. 8 — auth_result (server-side), pas 3.5c.
+                    logger.info("auth_result outcome=success event=register method={}", request.provider)
+                } catch (e: IllegalArgumentException) {
                     throw AuthConflictException(
-                        AuthErrorCode.PROVIDER_MISMATCH,
-                        e.message ?: "Account uses a different sign-in provider"
+                        AuthErrorCode.EMAIL_TAKEN,
+                        e.message ?: "Email is already registered"
                     )
                 }
+            } catch (e: com.revio.server.core.error.AuthApiException) {
+                // Ev. 8 — auth_result (server-side), pas 3.5c: distinguishes outcome and method so
+                // a failure rate can be computed per provider, mirroring the client-side "Ev. 7"
+                // event from pas 2.2b without duplicating its Analytics-specific shape here.
+                logger.info("auth_result outcome=failure event=register method={} code={}", request.provider, e.code)
                 throw e
             }
-            if (result != null) {
-                if (result.userId != null) {
-                    val banState = userDao.findBanState(result.userId)
-                    if (banState?.isActive() == true) {
-                        throw AuthForbiddenException(AuthErrorCode.ACCOUNT_SUSPENDED, banSuspensionMessage(banState))
+        }
+
+        post("/login") {
+            val request = call.receive<LoginRequest>()
+
+            try {
+                val result = try {
+                    when (request.provider) {
+                        AuthProvider.REGULAR -> {
+                            val email = request.email
+                                ?.trim()
+                                ?.lowercase()
+                                ?: throw AuthBadRequestException(
+                                    AuthErrorCode.VALIDATION_ERROR,
+                                    "Email is required"
+                                )
+
+                            if (!isValidEmail(email)) {
+                                throw AuthBadRequestException(
+                                    AuthErrorCode.VALIDATION_ERROR,
+                                    "Invalid email format"
+                                )
+                            }
+
+                            val password = request.password
+                                ?: throw AuthBadRequestException(
+                                    AuthErrorCode.VALIDATION_ERROR,
+                                    "Password is required"
+                                )
+                            authService.regularLogin(email, password)
+                        }
+                        AuthProvider.GOOGLE -> {
+                            val googleIdToken = request.googleIdToken
+                                ?: throw AuthBadRequestException(
+                                    AuthErrorCode.VALIDATION_ERROR,
+                                    "Google ID token is required"
+                                )
+                            authService.googleLogin(googleIdToken)
+                        }
                     }
+                } catch (e: IllegalArgumentException) {
+                    if (e.message?.contains("registered with password login", ignoreCase = true) == true) {
+                        throw AuthConflictException(
+                            AuthErrorCode.PROVIDER_MISMATCH,
+                            e.message ?: "Account uses a different sign-in provider"
+                        )
+                    }
+                    throw e
                 }
-                val scope = if (result.userId == null) SessionScope.ONBOARDING else SessionScope.FULL
-                val (session, refreshToken) = sessionService.createSession(
-                    credentialId = result.id,
-                    scope = scope,
-                    userId = result.userId,
-                    deviceId = request.deviceId,
-                    deviceName = request.deviceName,
-                    userAgent = call.request.headers[HttpHeaders.UserAgent],
-                    ip = call.request.local.remoteHost
-                )
-                val accessToken = jwtService.generateAccessToken(
-                    session = session,
-                    credentialId = result.id,
-                    email = result.email,
-                    userId = result.userId,
-                    isAdmin = userDao.isAdmin(result.userId),
-                )
-                val onboardingStep =
-                    if (result.userId == null) OnboardingStep.PROFILE_REQUIRED
-                    else OnboardingStep.COMPLETED
-                call.respond(
-                    HttpStatusCode.OK,
-                    AuthResponse(
-                        accessToken = accessToken,
-                        refreshToken = refreshToken,
-                        expiresIn = JwtService.EXPIRES_IN_SECONDS,
-                        scope = session.scope.name,
-                        onboardingStep = onboardingStep,
-                        waitlist = result.waitlist,
+                if (result != null) {
+                    if (result.userId != null) {
+                        val banState = userDao.findBanState(result.userId)
+                        if (banState?.isActive() == true) {
+                            throw AuthForbiddenException(AuthErrorCode.ACCOUNT_SUSPENDED, banSuspensionMessage(banState))
+                        }
+                    }
+                    val scope = if (result.userId == null) SessionScope.ONBOARDING else SessionScope.FULL
+                    val (session, refreshToken) = sessionService.createSession(
+                        credentialId = result.id,
+                        scope = scope,
+                        userId = result.userId,
+                        deviceId = request.deviceId,
+                        deviceName = request.deviceName,
+                        userAgent = call.request.headers[HttpHeaders.UserAgent],
+                        ip = call.request.local.remoteHost
                     )
-                )
-            } else {
-                throw AuthUnauthorizedException(
-                    AuthErrorCode.INVALID_CREDENTIALS,
-                    "Invalid credentials"
-                )
+                    val accessToken = jwtService.generateAccessToken(
+                        session = session,
+                        credentialId = result.id,
+                        email = result.email,
+                        userId = result.userId,
+                        isAdmin = userDao.isAdmin(result.userId),
+                    )
+                    val onboardingStep =
+                        if (result.userId == null) OnboardingStep.PROFILE_REQUIRED
+                        else OnboardingStep.COMPLETED
+                    call.respond(
+                        HttpStatusCode.OK,
+                        AuthResponse(
+                            accessToken = accessToken,
+                            refreshToken = refreshToken,
+                            expiresIn = JwtService.EXPIRES_IN_SECONDS,
+                            scope = session.scope.name,
+                            onboardingStep = onboardingStep,
+                            waitlist = result.waitlist,
+                        )
+                    )
+                    // Ev. 8 — auth_result (server-side), pas 3.5c.
+                    logger.info("auth_result outcome=success event=login method={}", request.provider)
+                } else {
+                    throw AuthUnauthorizedException(
+                        AuthErrorCode.INVALID_CREDENTIALS,
+                        "Invalid credentials"
+                    )
+                }
+            } catch (e: com.revio.server.core.error.AuthApiException) {
+                // Ev. 8 — auth_result (server-side), pas 3.5c: distinguishes outcome and method so
+                // a failure rate can be computed per provider, mirroring the client-side "Ev. 7"
+                // event from pas 2.2b without duplicating its Analytics-specific shape here.
+                logger.info("auth_result outcome=failure event=login method={} code={}", request.provider, e.code)
+                throw e
             }
         }
 
@@ -283,6 +308,10 @@ fun Route.authRoutes() {
                     "Refresh token was already consumed"
                 )
             } catch (_: RefreshTokenReusedException) {
+                logger.warn(
+                    "Refresh token reuse detected, tokenHash={}",
+                    refreshTokenHasher.hashOf(request.refreshToken)
+                )
                 throw AuthUnauthorizedException(
                     AuthErrorCode.REFRESH_TOKEN_REUSED,
                     "Refresh token reuse detected"
@@ -350,7 +379,10 @@ fun Route.authRoutes() {
                         AuthErrorCode.ACCESS_TOKEN_INVALID,
                         "Invalid or missing session id"
                     )
+                val credentialId = call.getUuidClaim("credentialId")
                 sessionService.revokeSession(sessionId, RevokeReason.LOGOUT)
+                // Audit trail (pas 5.8, same technique as pas 5.4's account-deletion audit).
+                logger.info("Logout audit: credentialId={}, sessionId={}", credentialId, sessionId)
                 call.respond(HttpStatusCode.NoContent)
             }
 
@@ -489,6 +521,11 @@ fun Route.authRoutes() {
                             email = credential.email,
                             userId = session.userId,
                             isAdmin = userDao.isAdmin(session.userId),
+                        )
+                        // Audit trail (pas 5.8, same technique as pas 5.4's account-deletion audit).
+                        logger.info(
+                            "Password change audit: credentialId={}, emailHash={}",
+                            credentialId, hashEmailForLogging(credential.email),
                         )
                         call.respond(
                             HttpStatusCode.OK,

@@ -11,9 +11,13 @@ import com.revio.server.features.report.ReportStatus
 import features.report.IReportService
 import features.report.ModerationDecision
 import features.report.Report
+import features.report.ReportAdminDTO
 import features.report.ReportNotFoundException
 import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
@@ -30,6 +34,7 @@ import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -117,6 +122,94 @@ class ReportAdminRoutesTest {
             contentType(ContentType.Application.Json)
             setBody("""{"decision":"${decision.name}"}""")
         }
+
+    // ---------- GET /admin/reports (pas 4.3) ----------
+
+    @Test
+    fun `GET reports defaults to PENDING when no status filter is given`() {
+        val service = mockk<IReportService>()
+        coEvery { service.listReports(ReportStatus.PENDING, 50) } returns listOf(resolvedReport(ReportStatus.PENDING))
+
+        adminTest(service) { client, token ->
+            val resp = client.get("/api/admin/reports") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+            assertEquals(HttpStatusCode.OK, resp.status)
+            val body: List<ReportAdminDTO> = resp.body()
+            assertEquals(1, body.size)
+            assertEquals(ReportStatus.PENDING, body.first().status)
+        }
+    }
+
+    @Test
+    fun `GET reports honors an explicit status filter`() {
+        val service = mockk<IReportService>()
+        coEvery { service.listReports(ReportStatus.REVIEWED, 50) } returns listOf(resolvedReport(ReportStatus.REVIEWED))
+
+        adminTest(service) { client, token ->
+            val resp = client.get("/api/admin/reports") {
+                header(HttpHeaders.Authorization, "Bearer $token")
+                parameter("status", "reviewed")
+            }
+
+            assertEquals(HttpStatusCode.OK, resp.status)
+            val body: List<ReportAdminDTO> = resp.body()
+            assertEquals(1, body.size)
+            assertEquals(ReportStatus.REVIEWED, body.first().status)
+        }
+    }
+
+    @Test
+    fun `GET reports returns 400 for an invalid status filter`() {
+        val service = mockk<IReportService>(relaxed = true)
+
+        adminTest(service) { client, token ->
+            val resp = client.get("/api/admin/reports") {
+                header(HttpHeaders.Authorization, "Bearer $token")
+                parameter("status", "not-a-status")
+            }
+
+            assertEquals(HttpStatusCode.BadRequest, resp.status)
+        }
+    }
+
+    @Test
+    fun `GET reports returns an empty array not 404 when none match`() {
+        val service = mockk<IReportService>()
+        coEvery { service.listReports(ReportStatus.PENDING, 50) } returns emptyList()
+
+        adminTest(service) { client, token ->
+            val resp = client.get("/api/admin/reports") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+            assertEquals(HttpStatusCode.OK, resp.status)
+            val body: List<ReportAdminDTO> = resp.body()
+            assertTrue(body.isEmpty())
+        }
+    }
+
+    @Test
+    fun `GET reports rejects a non-admin token`() {
+        val service = mockk<IReportService>(relaxed = true)
+
+        testApplication {
+            application { testReportAdminModule(service) }
+            val client = createClient { install(ContentNegotiation) { json(json) } }
+
+            val seeded = CommentTestSeed.seedUser(username = "plainuser2")
+            val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
+                credentialId = seeded.authId,
+                scope = SessionScope.FULL,
+                userId = seeded.userId,
+                deviceId = null,
+                deviceName = null,
+                userAgent = null,
+                ip = null,
+            )
+            val userToken = jwt.generateAccessToken(session, seeded.authId, seeded.email, seeded.userId)
+
+            val resp = client.get("/api/admin/reports") { header(HttpHeaders.Authorization, "Bearer $userToken") }
+            assertEquals(HttpStatusCode.Forbidden, resp.status)
+        }
+    }
 
     @Test
     fun `resolve returns 200 when the takedown succeeds`() {

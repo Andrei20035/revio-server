@@ -230,8 +230,8 @@ Not every authenticated token contains a `userId`. Registration can create crede
 | `post` | Feed, user posts, post detail, create/delete post with image | Multipart metadata + image upload; validates content type, image size, caption length, coordinates, and car source |
 | `comment` | List, create, delete comments | Reads comments with author username/avatar in one query; returns empty list without checking post existence to avoid an extra query |
 | `like` | Toggle like and read like status | Unique `(user_id, post_id)` prevents duplicate likes; optional JWT on status endpoint lets anonymous clients get counts |
-| `friend` | Add/delete/list friendships | Stores symmetric friendships as a canonical ordered pair to avoid duplicate inverse rows |
-| `friend_request` | Send, accept, decline, list requests | Accept converts a request into a canonical friendship row |
+| `friend` | Add/delete/list friendships | Stores symmetric friendships as a canonical ordered pair to avoid duplicate inverse rows. **Inactive** (pas 4.4, plan §Faza 4): not called from the Android app — the 4 endpoints exist and pass their own tests, but are backlog, not closed-testing scope |
+| `friend_request` | Send, accept, decline, list requests | Accept converts a request into a canonical friendship row. **Inactive** (pas 4.4, plan §Faza 4): not called from the Android app — the 5 endpoints exist and pass their own tests, but are backlog, not closed-testing scope |
 | `user_car` | One showcased car per user with image | Mirrors post car-source validation and stores either catalog model or custom brand/model |
 
 ## Database Design

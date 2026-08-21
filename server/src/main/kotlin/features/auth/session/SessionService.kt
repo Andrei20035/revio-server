@@ -1,6 +1,7 @@
 package com.revio.server.features.auth.session
 
 import com.revio.server.features.auth.RefreshTokenGenerator
+import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
@@ -22,6 +23,7 @@ class SessionService(
 ) : ISessionService {
 
     companion object {
+        private val logger = LoggerFactory.getLogger(SessionService::class.java)
         val IDLE_TTL: Duration = Duration.ofDays(30)
         val ABSOLUTE_TTL: Duration = Duration.ofDays(180)
         const val GRACE_WINDOW_SECONDS: Long = 30L
@@ -149,13 +151,28 @@ class SessionService(
         credentialId: UUID,
         version: Int,
     ): AuthSession? {
-        val session = dao.findById(sessionId) ?: return null
+        val session = dao.findById(sessionId)
+        if (session == null) {
+            logger.warn("Session rejected: session_not_found, sessionId={}", sessionId)
+            return null
+        }
         val now = Instant.now()
-        if (session.status != SessionStatus.ACTIVE) return null
-        if (session.credentialId != credentialId) return null
-        if (session.version != version) return null
-        if (now > session.idleExpiresAt) return null
-        if (now > session.absoluteExpiresAt) return null
+        if (session.status != SessionStatus.ACTIVE) {
+            logger.warn("Session rejected: not_active, sessionId={}, status={}", sessionId, session.status)
+            return null
+        }
+        if (session.credentialId != credentialId) {
+            logger.warn("Session rejected: credential_mismatch, sessionId={}", sessionId)
+            return null
+        }
+        if (session.version != version) {
+            logger.warn("Session rejected: version_mismatch, sessionId={}, expected={}, actual={}", sessionId, session.version, version)
+            return null
+        }
+        if (now > session.idleExpiresAt || now > session.absoluteExpiresAt) {
+            logger.warn("Session rejected: expired, sessionId={}", sessionId)
+            return null
+        }
         return session
     }
 

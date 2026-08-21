@@ -9,6 +9,9 @@ import com.revio.server.features.account_deletion.AccountDeletionFeedbackDAO
 import com.revio.server.features.account_deletion.AccountDeletionService
 import com.revio.server.features.account_deletion.IAccountDeletionFeedbackDAO
 import com.revio.server.features.account_deletion.IAccountDeletionService
+import com.revio.server.features.activity.ActivityService
+import com.revio.server.features.activity.IActivityService
+import com.revio.server.features.activity.activityRoutes
 import com.revio.server.features.announcement.AnnouncementService
 import com.revio.server.features.announcement.IAnnouncementService
 import com.revio.server.features.announcement.IUserAnnouncementDAO
@@ -107,6 +110,8 @@ import com.revio.server.features.waitlist.IWaitlistSyncService
 import com.revio.server.features.waitlist.WaitlistDAO
 import com.revio.server.features.waitlist.WaitlistSyncService
 import com.revio.server.features.waitlist.waitlistRoutes
+import features.activity.ActivityDAO
+import features.activity.IActivityDAO
 import features.comment.CommentDAO
 import features.comment.ICommentDAO
 import features.comment.CommentService
@@ -790,6 +795,43 @@ fun Application.testLeaderboardModule(storage: IStorageService? = null) {
     routing {
         route("/api") {
             leaderboardRoutes()
+        }
+    }
+}
+
+fun Application.testActivityModule(storage: IStorageService? = null) {
+    val uploadsDir = Files.createTempDirectory("activity-route-test-uploads")
+    val koinTestModule = module {
+        single<IActivityDAO> { ActivityDAO() }
+        single<ILeaderboardDAO> { LeaderboardDAO() }
+        single<ILeaderboardSnapshotDAO> { LeaderboardSnapshotDAO() }
+        single<IPostDAO> { PostDAO() }
+        single<IAuthSessionDAO> { AuthSessionDAO() }
+        single { RefreshTokenGenerator() }
+        single<ISessionService> { SessionService(get(), get()) }
+        single<IStorageService> { storage ?: LocalImageStorageService(uploadsDir, "http://localhost:8080") }
+        single<IActivityService> {
+            ActivityService(get(), get<ILeaderboardSnapshotDAO>(), get<ILeaderboardDAO>(), get<IPostDAO>(), get())
+        }
+        single {
+            JwtService(
+                jwtSecret = TestEnv.JWT_SECRET,
+                jwtIssuer = TestEnv.JWT_ISSUER,
+                jwtAudience = TestEnv.JWT_AUDIENCE,
+            )
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+    configureSecurity(getKoin().get())
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            activityRoutes()
         }
     }
 }

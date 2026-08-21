@@ -27,7 +27,10 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.Json
 import org.koin.ktor.ext.inject
+import org.slf4j.LoggerFactory
 import java.util.UUID
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.post.PostRoutes")
 
 private const val DEFAULT_LIMIT = 20
 private const val MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
@@ -203,13 +206,19 @@ fun Route.postRoutes() {
                     )
                 )
 
-                val user = runCatching { userService.getSelf(userId) }.getOrNull()
+                val user = runCatching { userService.getSelf(userId) }
+                    .onFailure { logger.warn("getSelf failed after creating post {} for user {}", postId, userId, it) }
+                    .getOrNull()
+                if (user == null) {
+                    logger.warn("Post {} created with user=null in the response for user {}", postId, userId)
+                }
                 call.respond(HttpStatusCode.Created, CreatePostResponse(postId.toString(), user))
             } catch (e: BadRequestException) {
-                call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "Invalid request")))
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid request"))
             } catch (e: IllegalArgumentException) {
-                call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "Invalid request")))
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid request"))
             } catch (e: PostCreationException) {
+                logger.error("Post creation failed for user {} at stage={}", userId, e.stage, e)
                 call.respond(HttpStatusCode.InternalServerError, mapOf("error" to "Failed to create post"))
             }
         }

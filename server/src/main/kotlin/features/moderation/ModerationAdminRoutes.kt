@@ -150,8 +150,28 @@ private fun AdminAuditLogEntry.toDTO() = AdminAuditLogEntryDTO(
     createdAt = createdAt,
 )
 
-fun Route.moderationAdminRoutes() {
+fun Route.moderationAdminRoutes(
+    cronSecretProvider: () -> String? = { System.getenv("CRON_SECRET") },
+) {
     val moderationService: IModerationService by application.inject()
+
+    // Dedicated endpoint for the external (GitHub Actions) drain cron (pas 5.3) — same
+    // X-Cron-Secret gate as AdminLeaderboardRoutes.kt's /snapshot/today, since the caller has no
+    // admin user session. Reuses the same retryOrphanedStorage() as the human-operated
+    // /admin/storage/retry-orphans below.
+    route("/internal/storage") {
+        post("/retry-orphans") {
+            val secret = call.request.headers["X-Cron-Secret"]
+            val expectedSecret = cronSecretProvider()
+            if (expectedSecret.isNullOrBlank() || secret != expectedSecret) {
+                call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing cron secret"))
+                return@post
+            }
+
+            val result = moderationService.retryOrphanedStorage()
+            call.respond(HttpStatusCode.OK, RetryOrphansResponseDTO(attempted = result.attempted, succeeded = result.succeeded))
+        }
+    }
 
     authenticate("admin") {
         route("/admin/posts") {

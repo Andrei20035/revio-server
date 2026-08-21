@@ -37,6 +37,7 @@ dependencies {
     implementation(libs.ktor.server.auth.jwt)
     implementation(libs.ktor.server.compression)
     implementation(libs.ktor.server.call.logging)
+    implementation(libs.ktor.server.call.id)
     implementation(libs.ktor.server.netty)
     implementation(libs.ktor.server.config.yaml)
     implementation(libs.ktor.server.host.common)

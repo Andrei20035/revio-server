@@ -1,8 +1,8 @@
 package com.revio.server.features.waitlist
 
+import com.revio.server.core.util.hashEmailForLogging
 import kotlinx.coroutines.withTimeout
 import org.slf4j.LoggerFactory
-import java.security.MessageDigest
 import java.time.Duration
 import java.time.OffsetDateTime
 import java.util.concurrent.ConcurrentHashMap
@@ -139,7 +139,10 @@ class WaitlistLookupService(
         waitlistDao.upsertBatch(listOf(row))
         waitlistDao.findByNormalizedEmail(row.email.trim().lowercase())
     } catch (e: Exception) {
-        logger.error("Failed to persist live waitlist lookup result for {}", hashEmailForLogging(row.email), e)
+        // pas 5.5: was hashEmailForLogging(row.email) — the raw, un-normalized value, unlike
+        // every other call site in this file. Same email, different case/whitespace, hashed to a
+        // different value here than everywhere else — broke log correlation for this one path.
+        logger.error("Failed to persist live waitlist lookup result for {}", hashEmailForLogging(row.email.trim().lowercase()), e)
         null
     }
 
@@ -155,11 +158,5 @@ class WaitlistLookupService(
         if (consecutiveFailures >= CIRCUIT_BREAKER_FAILURE_THRESHOLD) {
             circuitOpenUntil = OffsetDateTime.now().plus(CIRCUIT_BREAKER_COOLDOWN)
         }
-    }
-
-    /** Truncated SHA-256 of the email — never log emails in clear text. */
-    private fun hashEmailForLogging(email: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(email.toByteArray())
-        return digest.joinToString("") { "%02x".format(it) }.take(12)
     }
 }

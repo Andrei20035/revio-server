@@ -30,6 +30,12 @@ import java.util.UUID
 
 class AuthServiceTest {
 
+    init {
+        // hashEmailForLogging (pas 5.5) is keyed by JWT_SECRET — googleLogin's debug log line
+        // reaches it on every call, not just failures.
+        System.setProperty("JWT_SECRET", "test-jwt-secret-for-auth-service-test")
+    }
+
     private fun newService(
         dao: IAuthDAO = mockk(relaxed = true),
         userService: IUserService = mockk(relaxed = true),

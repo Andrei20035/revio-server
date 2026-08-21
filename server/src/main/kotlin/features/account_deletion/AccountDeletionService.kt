@@ -6,11 +6,14 @@ import com.revio.server.core.error.AuthErrorCode
 import com.revio.server.core.error.AuthNotFoundException
 import com.revio.server.core.error.AuthUnauthorizedException
 import com.revio.server.core.storage.IStorageService
+import com.revio.server.core.util.hashEmailForLogging
 import com.revio.server.features.auth.AuthProvider
 import com.revio.server.features.auth.IAuthService
 import com.revio.server.features.auth.dto.DeleteAccountRequest
 import com.revio.server.features.auth.session.ISessionService
 import com.revio.server.features.auth.session.RevokeReason
+import com.revio.server.features.moderation.IOrphanedStorageObjectDAO
+import com.revio.server.features.moderation.OrphanedStorageObjectDAO
 import com.revio.server.features.post.PostTable
 import com.revio.server.features.user.IUserService
 import com.revio.server.features.user.dto.UserDTO
@@ -33,6 +36,9 @@ class AccountDeletionService(
     private val sessionService: ISessionService,
     private val feedbackDao: IAccountDeletionFeedbackDAO,
     private val storageService: IStorageService,
+    // Defaulted for the same reason as PostServiceImpl's trailing orphanedStorageDao: pre-existing
+    // callers that construct AccountDeletionService with the original 5 args keep compiling unchanged.
+    private val orphanedStorageDao: IOrphanedStorageObjectDAO = OrphanedStorageObjectDAO(),
 ) : IAccountDeletionService {
 
     private val logger = LoggerFactory.getLogger(AccountDeletionService::class.java)
@@ -71,10 +77,26 @@ class AccountDeletionService(
         // 5. Delete the credential; ON DELETE CASCADE removes everything else.
         authService.deleteCredentials(credentialId)
 
+        // Audit trail (pas 5.4): the only record that this account ever existed and was
+        // deliberately deleted, once ON DELETE CASCADE above has removed the row itself. Logged
+        // after the delete actually commits, not before, so this is a record of what happened —
+        // not of what was merely attempted. Email is hashed, never logged in clear (same
+        // technique as pas 3.5a's refresh-token-reuse WARN); credentialId/userId appear in clear,
+        // which is the existing, correct practice for server logs (see
+        // docs/telemetry-naming-and-forbidden-data.md's server-logging section).
+        logger.info(
+            "Account deletion audit: credentialId={}, userId={}, provider={}, reason={}, emailHash={}",
+            credentialId, user.id, credential.provider, reason, hashEmailForLogging(credential.email),
+        )
+
         // 6. Best-effort storage cleanup, after commit and outside any transaction.
         storageKeys.forEach { key ->
             runCatching { storageService.deleteImage(key) }
-                .onFailure { logger.warn("Account deleted but failed to delete storage object {}", key, it) }
+                .onFailure { e ->
+                    logger.warn("Account deleted but failed to delete storage object {}", key, e)
+                    runCatching { orphanedStorageDao.recordFailure(key, e.message) }
+                        .onFailure { logger.error("Failed to queue orphaned storage object {}", key, it) }
+                }
         }
     }
 

@@ -4,7 +4,10 @@ import io.ktor.server.application.*
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
+import org.slf4j.LoggerFactory
 import kotlin.time.Duration.Companion.seconds
+
+private val logger = LoggerFactory.getLogger("com.revio.server.config.Sockets")
 
 fun Application.configureSockets() {
     install(WebSockets) {
@@ -28,8 +31,7 @@ fun Application.configureSockets() {
                     }
                 }
             } catch (e: Exception) {
-                // Log or handle exceptions during WebSocket communication
-                // e.g., log.error("WebSocket error", e)
+                logger.error("WebSocket error", e)
             } finally {
                 // Clean up when connection closes if needed
             }
