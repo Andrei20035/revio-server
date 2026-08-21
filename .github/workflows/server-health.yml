@@ -1,0 +1,16 @@
+name: Server health
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check 5xx rate, database, and storage are healthy
+        run: |
+          curl -fsS -X GET "$CARSPOTTER_API_URL/health"
+        env:
+          CARSPOTTER_API_URL: ${{ secrets.CARSPOTTER_API_URL }}
