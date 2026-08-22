@@ -5,8 +5,15 @@ import com.revio.server.features.auth.RefreshTokenGenerator
 import com.revio.server.features.auth.session.AuthSessionDAO
 import com.revio.server.features.auth.session.SessionScope
 import com.revio.server.features.auth.session.SessionService
+import com.revio.server.features.moderation.AdminAuditLogEntry
 import com.revio.server.features.moderation.AdminAuditLogTable
+import com.revio.server.features.moderation.AdminUserSummary
+import com.revio.server.features.moderation.BulkRemovalResult
+import com.revio.server.features.moderation.IModerationService
+import com.revio.server.features.moderation.ModerationReason
 import com.revio.server.features.moderation.ModerationViolationTable
+import com.revio.server.features.moderation.OrphanRetryResult
+import com.revio.server.features.moderation.UserModerationDetail
 import com.revio.server.features.notification.NotificationTable
 import com.revio.server.features.post.PostTable
 import io.ktor.client.HttpClient
@@ -20,6 +27,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.application.Application
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
@@ -27,6 +35,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.AfterAll
@@ -37,6 +46,8 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import org.koin.dsl.module
+import org.koin.ktor.ext.getKoin
 import testutils.CommentTestSeed
 import testutils.TestDatabaseFactory
 import testutils.TestEnv
@@ -103,6 +114,14 @@ class ModerationAdminRoutesTest {
         ModerationViolationTable.selectAll().where { ModerationViolationTable.postId eq postId }.count()
     }
 
+    private fun violationReason(postId: UUID): ModerationReason? = transaction {
+        ModerationViolationTable
+            .select(ModerationViolationTable.reason)
+            .where { ModerationViolationTable.postId eq postId }
+            .map { it[ModerationViolationTable.reason] }
+            .singleOrNull()
+    }
+
     private fun notificationCount(userId: UUID): Long = transaction {
         NotificationTable.selectAll().where { NotificationTable.userId eq userId }.count()
     }
@@ -137,6 +156,23 @@ class ModerationAdminRoutesTest {
             header(HttpHeaders.Authorization, "Bearer $token")
             contentType(ContentType.Application.Json)
             setBody("""{"reason":"OTHER"}""")
+        }
+
+        assertEquals(HttpStatusCode.BadRequest, resp.status)
+        assertTrue(postExists(post.postId))
+    }
+
+    @Test
+    fun `remove post with reasonDetails over the length limit returns 400`() = moderationTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val post = CommentTestSeed.seedPost(alice.userId)
+        val token = adminToken()
+        val tooLong = "a".repeat(501)
+
+        val resp = client.post("/api/admin/posts/${post.postId}/remove") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody("""{"reason":"OTHER","reasonDetails":"$tooLong"}""")
         }
 
         assertEquals(HttpStatusCode.BadRequest, resp.status)
@@ -192,6 +228,88 @@ class ModerationAdminRoutesTest {
 
         assertEquals(HttpStatusCode.OK, resp.status)
         assertFalse(postExists(post.postId))
+    }
+
+    @Test
+    fun `remove post succeeds and records the correct reason for every one of the 13 moderation reasons`() = moderationTest { client ->
+        val token = adminToken()
+
+        ModerationReason.entries.forEach { reason ->
+            val user = CommentTestSeed.seedUser(username = "user-${reason.name.lowercase()}")
+            val post = CommentTestSeed.seedPost(user.userId)
+            val reasonDetails = if (reason == ModerationReason.OTHER) "Doesn't fit any category" else null
+
+            val body = buildString {
+                append("{\"reason\":\"${reason.name}\"")
+                if (reasonDetails != null) append(",\"reasonDetails\":\"$reasonDetails\"")
+                append("}")
+            }
+
+            val resp = client.post("/api/admin/posts/${post.postId}/remove") {
+                header(HttpHeaders.Authorization, "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+
+            assertEquals(HttpStatusCode.OK, resp.status, "reason=$reason")
+            assertFalse(postExists(post.postId), "reason=$reason: post row must be gone")
+            assertEquals(reason, violationReason(post.postId), "reason=$reason: violation must record this exact reason")
+            assertEquals(1L, violationCount(post.postId), "reason=$reason")
+            assertEquals(1L, notificationCount(user.userId), "reason=$reason")
+            assertEquals(1L, auditLogCount(post.postId), "reason=$reason")
+        }
+    }
+
+    private class ThrowingModerationService : IModerationService {
+        override suspend fun removePost(postId: UUID, adminId: UUID, reason: ModerationReason, reasonDetails: String?): UUID =
+            throw RuntimeException("simulated moderation failure")
+
+        override suspend fun bulkRemovePosts(
+            postIds: List<UUID>,
+            adminId: UUID,
+            reason: ModerationReason,
+            reasonDetails: String?,
+        ): BulkRemovalResult = TODO("not used in this test")
+
+        override suspend fun retryOrphanedStorage(): OrphanRetryResult = TODO("not used in this test")
+
+        override suspend fun searchUsers(query: String, limit: Int): List<AdminUserSummary> = TODO("not used in this test")
+
+        override suspend fun getUserModeration(userId: UUID): UserModerationDetail = TODO("not used in this test")
+
+        override suspend fun banUser(userId: UUID, durationDays: Int?, permanent: Boolean, reason: String?, adminId: UUID): Unit =
+            TODO("not used in this test")
+
+        override suspend fun unbanUser(userId: UUID, adminId: UUID): Unit = TODO("not used in this test")
+
+        override suspend fun revokeViolation(violationId: UUID, adminId: UUID): Unit = TODO("not used in this test")
+
+        override suspend fun listAuditLog(limit: Int): List<AdminAuditLogEntry> = TODO("not used in this test")
+    }
+
+    private fun Application.withThrowingModeration() {
+        testModerationModule()
+        getKoin().loadModules(listOf(module { single<IModerationService> { ThrowingModerationService() } }))
+    }
+
+    @Test
+    fun `remove post returns 500 JSON with a stable code when the moderation service throws`() = testApplication {
+        application { withThrowingModeration() }
+        val client = createClient { install(ContentNegotiation) { json(json) } }
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val post = CommentTestSeed.seedPost(alice.userId)
+        val token = adminToken()
+
+        val resp = client.post("/api/admin/posts/${post.postId}/remove") {
+            header(HttpHeaders.Authorization, "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody("""{"reason":"SPAM_OR_MISLEADING"}""")
+        }
+
+        assertEquals(HttpStatusCode.InternalServerError, resp.status)
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals("post_removal_failed", body["code"]?.jsonPrimitive?.content)
+        assertTrue(postExists(post.postId), "A thrown exception must not leave the post removed")
     }
 
     @Test

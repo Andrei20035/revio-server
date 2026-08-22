@@ -16,8 +16,11 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 import org.koin.ktor.ext.inject
+import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.util.UUID
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.moderation.ModerationAdminRoutes")
 
 @Serializable
 data class RemovePostRequest(val reason: ModerationReason, val reasonDetails: String? = null)
@@ -100,6 +103,9 @@ data class AdminAuditLogEntryDTO(
 
 /** reasonDetails is required (and must be non-blank) when reason is OTHER — the card's only free-text reason. */
 private fun ModerationReason.requiresDetails() = this == ModerationReason.OTHER
+
+/** Mirrors the Android sheet's own client-side cap (AdminRemovePostSheet.kt's MAX_OTHER_DETAILS_LENGTH). */
+private const val MAX_REASON_DETAILS_LENGTH = 500
 
 private fun BanState.toDTO() = BanStateDTO(
     isBanned = isBanned,
@@ -194,12 +200,26 @@ fun Route.moderationAdminRoutes(
                         mapOf("error" to "reasonDetails is required when reason is OTHER"),
                     )
                 }
+                if ((req.reasonDetails?.length ?: 0) > MAX_REASON_DETAILS_LENGTH) {
+                    return@post call.respond(
+                        HttpStatusCode.BadRequest,
+                        mapOf("error" to "reasonDetails must be at most $MAX_REASON_DETAILS_LENGTH characters"),
+                    )
+                }
+
+                logger.info("Admin {} removing post {} (reason={})", adminId, postId, req.reason)
 
                 try {
                     val violationId = moderationService.removePost(postId, adminId, req.reason, req.reasonDetails)
                     call.respond(HttpStatusCode.OK, RemovePostResponseDTO(violationId = violationId, postId = postId))
                 } catch (e: PostNotFoundException) {
                     call.respond(HttpStatusCode.NotFound, mapOf("error" to "Post not found"))
+                } catch (e: Exception) {
+                    logger.error("Removal failed for post {} (admin={})", postId, adminId, e)
+                    call.respond(
+                        HttpStatusCode.InternalServerError,
+                        mapOf("error" to "Failed to remove post", "code" to "post_removal_failed"),
+                    )
                 }
             }
 

@@ -290,6 +290,14 @@ class PostServiceImpl(
         // post's likes, comments and reports.
         val outcome = postRemovalDao.removePostAtomically(post.id, challengeProgressService.contributionRevokePolicy(), moderation)
 
+        // deletedRows == 0 means the post was already gone by the time the transaction ran (the
+        // findById above raced with a concurrent removal). A moderated removal must never report
+        // success without an actual delete, so this is treated the same as post-not-found rather
+        // than returning a 200 for a post that was never touched.
+        if (moderation != null && outcome.deletedRows == 0) {
+            throw PostNotFoundException(post.id)
+        }
+
         // Only once the transaction has committed is the image safe to drop. This one stays
         // best-effort: an orphaned object costs storage, it can't corrupt scores. A failure is
         // queued for retry rather than silently dropped, so a moderated removal is never undone

@@ -3,10 +3,12 @@ package service
 import com.revio.server.core.storage.IStorageService
 import com.revio.server.features.car_model.ICarModelDAO
 import com.revio.server.features.challenge.IChallengeProgressService
+import com.revio.server.features.moderation.ModerationReason
 import com.revio.server.features.post.IPostDAO
 import com.revio.server.features.post.IPostRemovalDAO
 import com.revio.server.features.post.InsertedPost
 import com.revio.server.features.post.Post
+import com.revio.server.features.post.PostNotFoundException
 import com.revio.server.features.post.PostRemovalOutcome
 import com.revio.server.features.post.PostServiceImpl
 import com.revio.server.features.post.PostSource
@@ -142,6 +144,26 @@ class PostServiceChallengeFailureTest {
         assertThrows<IllegalStateException> {
             kotlinx.coroutines.runBlocking {
                 service(challengeProgressService, postRemovalDao, postDao).removePostAsModerator(postId, UUID.randomUUID())
+            }
+        }
+    }
+
+    @Test
+    fun `removePostAsModerator throws PostNotFoundException instead of reporting success when deletedRows is 0`() = runTest {
+        val postDao = mockk<IPostDAO>()
+        coEvery { postDao.findById(postId) } returns seededPost()
+
+        val challengeProgressService = mockk<IChallengeProgressService>()
+        every { challengeProgressService.contributionRevokePolicy() } returns { true }
+
+        val postRemovalDao = mockk<IPostRemovalDAO>()
+        coEvery { postRemovalDao.removePostAtomically(any(), any(), any()) } returns
+            PostRemovalOutcome(deletedRows = 0, reversals = emptyList())
+
+        assertThrows<PostNotFoundException> {
+            kotlinx.coroutines.runBlocking {
+                service(challengeProgressService, postRemovalDao, postDao)
+                    .removePostAsModerator(postId, UUID.randomUUID(), ModerationReason.SPAM_OR_MISLEADING, null)
             }
         }
     }
