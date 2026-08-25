@@ -733,4 +733,16 @@ class UserServiceTest {
         assertEquals("INVALID_FORMAT", result.reason)
         coVerify(exactly = 0) { dao.usernameExistsIgnoreCase(any()) }
     }
+
+    // ---------- markFeedOpened (plan §18, step 6.2) ----------
+
+    @Test
+    fun `markFeedOpened delegates straight to the DAO's throttled update`() = runTest {
+        val dao = mockk<IUserDAO>(relaxed = true)
+        val userId = UUID.randomUUID()
+
+        newService(dao).markFeedOpened(userId)
+
+        coVerify(exactly = 1) { dao.updateLastFeedOpenIfStale(userId, any(), any()) }
+    }
 }

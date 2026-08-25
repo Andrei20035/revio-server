@@ -1,5 +1,7 @@
 package com.revio.server.config
 
+import com.revio.server.features.notification.FirebaseProject
+import com.revio.server.features.notification.IFcmCredentialsProvider
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.application.call
@@ -7,6 +9,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.koin.ktor.ext.inject
 import java.io.File
 
 /** Above this aggregate 5xx rate (pas 3.6), `/health` reports unhealthy. */
@@ -67,6 +70,8 @@ private fun checkServerErrorRate(): HealthCheckResult {
  * fails correctly.
  */
 fun Application.configureHealth() {
+    val fcmCredentialsProvider: IFcmCredentialsProvider by inject()
+
     routing {
         get("/health") {
             val checks = listOf(checkServerErrorRate(), checkDatabase(), checkStorage())
@@ -82,6 +87,19 @@ fun Application.configureHealth() {
                     )
                 )
             }
+        }
+
+        // Separate from `/health` on purpose: FCM isn't used to send anything yet (see the
+        // push-notifications plan's Faza 3), so an unconfigured project here must never flip the
+        // app's own liveness/readiness signal to unhealthy. Always 200 — the body carries the
+        // per-project status. Reveals only which of the two known projects (DEBUG/RELEASE)
+        // successfully minted a token; the reason for a failure is in the server logs
+        // (FcmCredentialsProvider), never here, and neither ever includes the credential itself.
+        get("/health/fcm") {
+            val statuses = FirebaseProject.entries.associate { project ->
+                project.name to mapOf("healthy" to (fcmCredentialsProvider.getAccessToken(project) != null))
+            }
+            call.respond(HttpStatusCode.OK, mapOf("fcm" to statuses))
         }
     }
 }

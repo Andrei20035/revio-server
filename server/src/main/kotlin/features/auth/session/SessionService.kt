@@ -1,6 +1,9 @@
 package com.revio.server.features.auth.session
 
+import com.revio.server.config.NotificationMetrics
 import com.revio.server.features.auth.RefreshTokenGenerator
+import com.revio.server.features.notification.IUserDeviceDAO
+import com.revio.server.features.notification.UserDeviceDAO
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
@@ -20,6 +23,7 @@ class SessionNotFoundException : Exception("Session not found")
 class SessionService(
     private val dao: IAuthSessionDAO,
     private val refreshTokenGenerator: RefreshTokenGenerator,
+    private val userDeviceDao: IUserDeviceDAO = UserDeviceDAO(),
 ) : ISessionService {
 
     companion object {
@@ -27,6 +31,36 @@ class SessionService(
         val IDLE_TTL: Duration = Duration.ofDays(30)
         val ABSOLUTE_TTL: Duration = Duration.ofDays(180)
         const val GRACE_WINDOW_SECONDS: Long = 30L
+
+        /**
+         * Revoke reasons that also mean "this device should stop receiving push" — either the
+         * user signed out (LOGOUT/LOGOUT_ALL), the account is gone/suspended, or this session was
+         * superseded by a newer login for the same credential (last-login-wins; see
+         * replaceActiveSession). Expiry/rotation-failure reasons are deliberately excluded: an
+         * idle/expired/reused session doesn't mean the device itself should stop getting push —
+         * only an explicit sign-out or an account-level action does.
+         */
+        private val DEVICE_DEACTIVATING_REASONS = setOf(
+            RevokeReason.LOGOUT,
+            RevokeReason.LOGOUT_ALL,
+            RevokeReason.SUPERSEDED,
+            RevokeReason.ACCOUNT_DELETED,
+            RevokeReason.ACCOUNT_SUSPENDED,
+        )
+    }
+
+    /**
+     * Deactivates the device tied to [session] (its user_devices row) when [reason] is one of
+     * [DEVICE_DEACTIVATING_REASONS]. A no-op when the session has no userId (ONBOARDING scope,
+     * never registered a device) or no deviceId (never sent one at login/register).
+     */
+    private suspend fun deactivateDeviceIfNeeded(session: AuthSession?, reason: RevokeReason) {
+        if (reason !in DEVICE_DEACTIVATING_REASONS) return
+        val userId = session?.userId ?: return
+        val deviceId = session.deviceId ?: return
+        if (userDeviceDao.deactivate(userId, deviceId)) {
+            NotificationMetrics.deviceDeactivated(reason.name.lowercase())
+        }
     }
 
     /**
@@ -46,6 +80,11 @@ class SessionService(
         val (rawToken, hash) = refreshTokenGenerator.generate()
         val now = Instant.now()
 
+        // Captured before replaceActiveSession supersedes it, so its device can be deactivated
+        // below — but only once we know the new session's own deviceId, since a same-device
+        // re-login must not deactivate the device that is logging back in.
+        val previouslyActive = dao.listActiveSessions(credentialId)
+
         val session = dao.replaceActiveSession(
             NewAuthSession(
                 credentialId = credentialId,
@@ -60,6 +99,11 @@ class SessionService(
                 absoluteExpiresAt = now + ABSOLUTE_TTL,
             )
         )
+
+        previouslyActive
+            .filter { it.deviceId != null && it.deviceId != deviceId }
+            .forEach { deactivateDeviceIfNeeded(it, RevokeReason.SUPERSEDED) }
+
         return Pair(session, rawToken)
     }
 
@@ -101,7 +145,10 @@ class SessionService(
     }
 
     override suspend fun revokeSession(sessionId: UUID, reason: RevokeReason) {
+        // Fetched before revoking so we still know which device this session belonged to.
+        val session = if (reason in DEVICE_DEACTIVATING_REASONS) dao.findById(sessionId) else null
         dao.revokeSession(sessionId, reason)
+        deactivateDeviceIfNeeded(session, reason)
     }
 
     override suspend fun revokeAllSessions(
@@ -109,7 +156,13 @@ class SessionService(
         reason: RevokeReason,
         exceptSessionId: UUID?,
     ) {
+        val sessionsToRevoke = if (reason in DEVICE_DEACTIVATING_REASONS) {
+            dao.listActiveSessions(credentialId).filter { it.id != exceptSessionId }
+        } else {
+            emptyList()
+        }
         dao.revokeActiveByCredential(credentialId, reason, exceptSessionId)
+        sessionsToRevoke.forEach { deactivateDeviceIfNeeded(it, reason) }
     }
 
     /**

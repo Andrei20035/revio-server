@@ -35,4 +35,11 @@ object UserTable : UUIDTable("users") {
     val banReason = text("ban_reason").nullable()
     val bannedAt = timestamp("banned_at").nullable()
     val bannedBy = uuid("banned_by").references(UserTable.id, onDelete = ReferenceOption.SET_NULL).nullable()
+
+    /**
+     * Last time this user opened the feed (plan §18, step 6.2) — backs the discovery job's 12h
+     * gate (§8.3). Written by the feed endpoint itself, throttled there so it isn't a write on
+     * every request (pagination in particular never touches it). See V39.
+     */
+    val lastFeedOpenAt = timestamp("last_feed_open_at").nullable()
 }

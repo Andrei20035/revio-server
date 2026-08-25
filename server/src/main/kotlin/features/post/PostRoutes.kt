@@ -109,6 +109,14 @@ fun Route.postRoutes() {
             is ViewerResult.Resolved -> viewer.userId
         }
 
+        // "Opened the feed" (plan §18, step 6.2) is a fresh, non-paginated load only — a cursor
+        // present means this is a loadMore/scroll continuation of a feed already open, not a new
+        // open. Combined with updateLastFeedOpenIfStale's own throttling, this keeps pagination
+        // and rapid re-opens from adding a write on every request.
+        if (currentUserId != null && cursorCreatedAt == null && cursorPostId == null) {
+            userService.markFeedOpened(currentUserId)
+        }
+
         try {
             call.respond(
                 HttpStatusCode.OK,

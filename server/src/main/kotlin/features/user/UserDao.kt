@@ -8,11 +8,13 @@ import com.revio.server.features.post.PostTable
 import com.revio.server.features.scoring.ScoringServiceImpl
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.javatime.CurrentTimestamp
 import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.sql.Connection
+import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.util.*
@@ -83,6 +85,16 @@ interface IUserDAO {
      * Must be called inside an existing [transaction] block.
      */
     suspend fun advanceStreak(userId: UUID, localDay: LocalDate, timezoneId: String?)
+
+    /**
+     * Marks that [userId] just opened the feed (plan §18, step 6.2 — backs the discovery job's
+     * 12h gate, §8.3). A single conditional `UPDATE`: it only actually writes when
+     * `last_feed_open_at` is null or older than [staleAfter], so calling this on every feed
+     * request (as [features.post] does, but only for a non-paginated request — see PostRoutes.kt)
+     * still doesn't add a write on every request, just an inexpensive no-op `UPDATE` most of the
+     * time.
+     */
+    suspend fun updateLastFeedOpenIfStale(userId: UUID, now: Instant = Instant.now(), staleAfter: Duration = Duration.ofMinutes(5))
 }
 
 class UserDao : IUserDAO {
@@ -291,6 +303,17 @@ class UserDao : IUserDAO {
             it[lastStreakDate] = localDay
             it[lastStreakTimezone] = timezoneId
         }
+    }
+
+    override suspend fun updateLastFeedOpenIfStale(userId: UUID, now: Instant, staleAfter: Duration): Unit = transaction {
+        val threshold = now.minus(staleAfter)
+        UserTable.update({
+            (UserTable.id eq userId) and
+                ((UserTable.lastFeedOpenAt.isNull()) or (UserTable.lastFeedOpenAt less threshold))
+        }) {
+            it[lastFeedOpenAt] = now
+        }
+        Unit
     }
 
     private fun ResultRow.toUser() = User(

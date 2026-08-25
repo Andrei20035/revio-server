@@ -3,8 +3,11 @@ package com.revio.server.features.notification
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.andWhere
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
@@ -20,6 +23,13 @@ data class Notification(
     val blocking: Boolean,
     val createdAt: Instant,
     val readAt: Instant?,
+    /** ACCOUNT for every pre-existing moderation row; LIKES/COMMENTS/DISCOVERY/REMINDERS for a social row (V36). */
+    val category: NotificationCategory,
+    /** Target spot for a LIKES/COMMENTS row — null for a non-social row, or a tombstone (deleted spot, `ON DELETE SET NULL`). */
+    val postId: UUID?,
+    /** Target comment for a COMMENTS row — same tombstone behavior as [postId]. */
+    val commentId: UUID?,
+    val deepLink: String?,
 )
 
 interface INotificationDAO {
@@ -35,6 +45,15 @@ interface INotificationDAO {
 
     /** Notifications for [userId], newest first. */
     suspend fun listForUser(userId: UUID, limit: Int): List<Notification>
+
+    /**
+     * Notifications for [userId], newest first, keyset-paginated: when [cursorCreatedAt] and
+     * [cursorId] are both non-null, only rows strictly before that (created_at, id) pair are
+     * returned. Ordered by (created_at DESC, id DESC) — the id tie-break, mirroring
+     * [com.revio.server.features.post.PostDAO.listFeed], keeps pagination stable (no skipped or
+     * duplicated rows) when two notifications share a created_at and under concurrent inserts.
+     */
+    suspend fun listForUserAfter(userId: UUID, limit: Int, cursorCreatedAt: Instant?, cursorId: UUID?): List<Notification>
 
     /** Count of [userId]'s notifications with `read_at IS NULL`. */
     suspend fun countUnread(userId: UUID): Long
@@ -84,6 +103,29 @@ class NotificationDAO : INotificationDAO {
             .map { it.toNotification() }
     }
 
+    override suspend fun listForUserAfter(
+        userId: UUID,
+        limit: Int,
+        cursorCreatedAt: Instant?,
+        cursorId: UUID?,
+    ): List<Notification> = transaction {
+        val query = NotificationTable
+            .selectAll()
+            .where { NotificationTable.userId eq userId }
+
+        if (cursorCreatedAt != null && cursorId != null) {
+            query.andWhere {
+                (NotificationTable.createdAt less cursorCreatedAt) or
+                    ((NotificationTable.createdAt eq cursorCreatedAt) and (NotificationTable.id less cursorId))
+            }
+        }
+
+        query
+            .orderBy(NotificationTable.createdAt to SortOrder.DESC, NotificationTable.id to SortOrder.DESC)
+            .limit(limit)
+            .map { it.toNotification() }
+    }
+
     override suspend fun countUnread(userId: UUID): Long = transaction {
         NotificationTable
             .selectAll()
@@ -119,5 +161,9 @@ class NotificationDAO : INotificationDAO {
         blocking = this[NotificationTable.blocking],
         createdAt = this[NotificationTable.createdAt],
         readAt = this[NotificationTable.readAt],
+        category = this[NotificationTable.category],
+        postId = this[NotificationTable.postId]?.value,
+        commentId = this[NotificationTable.commentId]?.value,
+        deepLink = this[NotificationTable.deepLink],
     )
 }

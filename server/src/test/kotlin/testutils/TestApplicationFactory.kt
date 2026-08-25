@@ -77,10 +77,24 @@ import com.revio.server.features.moderation.ModerationService
 import com.revio.server.features.moderation.ModerationViolationDAO
 import com.revio.server.features.moderation.OrphanedStorageObjectDAO
 import com.revio.server.features.moderation.moderationAdminRoutes
+import com.revio.server.features.notification.DeviceRegistryService
+import com.revio.server.features.notification.IDeviceRegistryService
 import com.revio.server.features.notification.INotificationDAO
+import com.revio.server.features.notification.INotificationEventService
+import com.revio.server.features.notification.INotificationOutboxDAO
+import com.revio.server.features.notification.NotificationEventService
+import com.revio.server.features.notification.NotificationOutboxDAO
+import com.revio.server.features.notification.INotificationPrefsService
 import com.revio.server.features.notification.INotificationService
+import com.revio.server.features.notification.IUserDeviceDAO
+import com.revio.server.features.notification.IUserNotificationPrefsDAO
 import com.revio.server.features.notification.NotificationDAO
+import com.revio.server.features.notification.NotificationPrefsService
 import com.revio.server.features.notification.NotificationService
+import com.revio.server.features.notification.UserDeviceDAO
+import com.revio.server.features.notification.UserNotificationPrefsDAO
+import com.revio.server.features.notification.deviceRoutes
+import com.revio.server.features.notification.notificationPrefsRoutes
 import com.revio.server.features.notification.notificationRoutes
 import com.revio.server.features.post.IPostDAO
 import com.revio.server.features.post.IPostService
@@ -275,7 +289,11 @@ fun Application.testCommentModule(storage: IStorageService? = null) {
         single<IStorageService> { storage ?: LocalImageStorageService(uploadsDir, "http://localhost:8080") }
         single<IScoringDao> { ScoringDaoImpl() }
         single<IScoringService> { ScoringServiceImpl(get(), get(), get()) }
-        single<ICommentService> { CommentService(get(), get(), get(), get()) }
+        single<INotificationEventService> { NotificationEventService() }
+        single<IUserNotificationPrefsDAO> { UserNotificationPrefsDAO() }
+        single<IUserDeviceDAO> { UserDeviceDAO() }
+        single<INotificationOutboxDAO> { NotificationOutboxDAO() }
+        single<ICommentService> { CommentService(get(), get(), get(), get(), get(), get(), get(), get()) }
         single {
             JwtService(
                 jwtSecret = TestEnv.JWT_SECRET,
@@ -313,7 +331,12 @@ fun Application.testLikeModule() {
         single<ISessionService> { SessionService(get(), get()) }
         single<IScoringDao> { ScoringDaoImpl() }
         single<IScoringService> { ScoringServiceImpl(get(), get(), get()) }
-        single<ILikeService> { LikeService(get(), get(), get()) }
+        single<INotificationEventService> { NotificationEventService() }
+        single<IUserDeviceDAO> { UserDeviceDAO() }
+        single<INotificationOutboxDAO> { NotificationOutboxDAO() }
+        single<features.like.ILikeNotificationCursorDAO> { features.like.LikeNotificationCursorDAO() }
+        single<IUserNotificationPrefsDAO> { UserNotificationPrefsDAO() }
+        single<ILikeService> { LikeService(get(), get(), get(), get(), get(), get(), get(), get(), get()) }
         single {
             JwtService(
                 jwtSecret = TestEnv.JWT_SECRET,
@@ -438,6 +461,74 @@ fun Application.testNotificationModule() {
     routing {
         route("/api") {
             notificationRoutes()
+        }
+    }
+}
+
+/**
+ * Modul Ktor pentru testele rutelor /devices.
+ * Folosește același config JWT ca testele de auth.
+ */
+fun Application.testDeviceModule() {
+    val koinTestModule = module {
+        single<IUserDeviceDAO> { UserDeviceDAO() }
+        single<IAuthSessionDAO> { AuthSessionDAO() }
+        single { RefreshTokenGenerator() }
+        single<ISessionService> { SessionService(get(), get()) }
+        single<IDeviceRegistryService> { DeviceRegistryService(get()) }
+        single {
+            JwtService(
+                jwtSecret = TestEnv.JWT_SECRET,
+                jwtIssuer = TestEnv.JWT_ISSUER,
+                jwtAudience = TestEnv.JWT_AUDIENCE
+            )
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+    configureSecurity(getKoin().get())
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            deviceRoutes()
+        }
+    }
+}
+
+/**
+ * Modul Ktor pentru testele rutelor /users/me/notification-preferences.
+ * Folosește același config JWT ca testele de auth.
+ */
+fun Application.testNotificationPrefsModule() {
+    val koinTestModule = module {
+        single<IUserNotificationPrefsDAO> { UserNotificationPrefsDAO() }
+        single<IAuthSessionDAO> { AuthSessionDAO() }
+        single { RefreshTokenGenerator() }
+        single<ISessionService> { SessionService(get(), get()) }
+        single<INotificationPrefsService> { NotificationPrefsService(get()) }
+        single {
+            JwtService(
+                jwtSecret = TestEnv.JWT_SECRET,
+                jwtIssuer = TestEnv.JWT_ISSUER,
+                jwtAudience = TestEnv.JWT_AUDIENCE
+            )
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+    configureSecurity(getKoin().get())
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            notificationPrefsRoutes()
         }
     }
 }

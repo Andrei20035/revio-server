@@ -13,6 +13,7 @@ import com.revio.server.features.post.dto.CreatePostResponse
 import com.revio.server.features.post.dto.FeedResponseDTO
 import com.revio.server.features.post.dto.PostDTO
 import com.revio.server.features.post.dto.UpdatePostRequest
+import com.revio.server.features.user.UserTable
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -36,6 +37,7 @@ import io.ktor.server.testing.*
 import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertDoesNotThrow
@@ -948,5 +950,47 @@ class PostRoutesTest {
         val response = client.get("/api/posts/${UUID.randomUUID()}")
 
         assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    // ---------- last_feed_open_at tracking (plan §18, step 6.2) ----------
+
+    private fun lastFeedOpenAtOf(userId: UUID) = transaction {
+        UserTable.selectAll().where { UserTable.id eq userId }.single()[UserTable.lastFeedOpenAt]
+    }
+
+    @Test
+    fun `GET feed with no cursor marks the feed as opened for the authenticated user`() = postTest { client ->
+        val user = CommentTestSeed.seedUser(username = "feedopen1")
+        val token = tokenFor(user.authId, user.userId, user.email)
+        assertEquals(null, lastFeedOpenAtOf(user.userId))
+
+        client.get("/api/posts/feed") { bearerAuth(token) }
+
+        assertNotNull(lastFeedOpenAtOf(user.userId))
+    }
+
+    @Test
+    fun `GET feed with a cursor (pagination) does not mark the feed as opened`() = postTest { client ->
+        val user = CommentTestSeed.seedUser(username = "feedopen2")
+        val token = tokenFor(user.authId, user.userId, user.email)
+
+        client.get("/api/posts/feed") {
+            bearerAuth(token)
+            parameter("cursorCreatedAt", Instant.now().toString())
+            parameter("cursorPostId", UUID.randomUUID().toString())
+        }
+
+        assertEquals(null, lastFeedOpenAtOf(user.userId))
+    }
+
+    @Test
+    fun `GET feed without a token never writes last_feed_open_at (no user to mark)`() = postTest { client ->
+        CommentTestSeed.seedUser(username = "anon-seed")
+
+        val response = client.get("/api/posts/feed")
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        // Nothing to assert on a specific user here — this test only guards against a crash when
+        // there's no authenticated viewer to mark.
     }
 }

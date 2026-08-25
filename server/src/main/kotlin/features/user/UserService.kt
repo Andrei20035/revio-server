@@ -31,6 +31,14 @@ interface IUserService {
      * no user to exclude from the uniqueness check.
      */
     suspend fun checkUsernameAvailabilityForNewUser(username: String): UsernameAvailabilityResult
+
+    /**
+     * Marks that [userId] just opened the feed (plan §18, step 6.2). Thin passthrough to
+     * [IUserDAO.updateLastFeedOpenIfStale] — the throttling (and the "don't write on every
+     * request" guarantee) lives entirely in that single conditional `UPDATE`; this method adds no
+     * logic of its own.
+     */
+    suspend fun markFeedOpened(userId: UUID)
 }
 
 data class UsernameAvailabilityResult(
@@ -223,6 +231,10 @@ class UserService(
         }
 
         return UsernameAvailabilityResult(available = true, normalized = trimmedLower, reason = null)
+    }
+
+    override suspend fun markFeedOpened(userId: UUID) {
+        userDao.updateLastFeedOpenIfStale(userId)
     }
 
     /** Shared format checks for both [checkUsernameAvailability] and [checkUsernameAvailabilityForNewUser]. */

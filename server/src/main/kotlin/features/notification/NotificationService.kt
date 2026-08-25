@@ -2,6 +2,10 @@ package com.revio.server.features.notification
 
 import com.revio.server.features.moderation.ModerationReason
 import com.revio.server.features.moderation.label
+import com.revio.server.features.notification.dto.NotificationCursorDTO
+import com.revio.server.features.notification.dto.NotificationListResponseDTO
+import com.revio.server.features.notification.dto.toDTO
+import java.time.Instant
 import java.util.UUID
 
 interface INotificationService {
@@ -18,6 +22,25 @@ interface INotificationService {
 
     /** Read-through to the DAO — used by the admin moderation-detail screen to show a user's recent notifications. */
     suspend fun listForUser(userId: UUID, limit: Int): List<Notification>
+
+    /**
+     * Builds the `GET /notifications` response: unread count plus a keyset-paginated page of
+     * [limit] items (already validated/clamped by the caller). [cursorCreatedAt]/[cursorNotificationId]
+     * must both be null (first page) or both be present (subsequent page) — a partial pair throws
+     * [IllegalArgumentException], mirroring [com.revio.server.features.post.PostService]'s feed cursor.
+     */
+    suspend fun listForUserPage(
+        userId: UUID,
+        limit: Int,
+        cursorCreatedAt: String?,
+        cursorNotificationId: String?,
+    ): NotificationListResponseDTO
+
+    /** [INotificationDAO.markRead] — see that doc; scoped to [userId] so one user can't mark another's read. */
+    suspend fun markRead(notificationId: UUID, userId: UUID): Boolean
+
+    /** [INotificationDAO.markAllRead]. */
+    suspend fun markAllRead(userId: UUID): Int
 }
 
 class NotificationService(
@@ -52,4 +75,52 @@ class NotificationService(
 
     override suspend fun listForUser(userId: UUID, limit: Int): List<Notification> =
         notificationDao.listForUser(userId, limit)
+
+    override suspend fun listForUserPage(
+        userId: UUID,
+        limit: Int,
+        cursorCreatedAt: String?,
+        cursorNotificationId: String?,
+    ): NotificationListResponseDTO {
+        val cursor = parseCursor(cursorCreatedAt, cursorNotificationId)
+
+        // Fetch one extra row to determine whether another page exists, exactly as
+        // PostService.listFeed does for the feed's own keyset cursor.
+        val rows = notificationDao.listForUserAfter(userId, limit + 1, cursor?.first, cursor?.second)
+        val hasMore = rows.size > limit
+        val page = if (hasMore) rows.take(limit) else rows
+
+        val nextCursor = if (hasMore) {
+            page.last().let { NotificationCursorDTO(it.createdAt, it.id) }
+        } else {
+            null
+        }
+
+        val unreadCount = notificationDao.countUnread(userId)
+
+        return NotificationListResponseDTO(
+            unreadCount = unreadCount,
+            items = page.map { it.toDTO() },
+            nextCursor = nextCursor,
+            hasMore = hasMore,
+        )
+    }
+
+    override suspend fun markRead(notificationId: UUID, userId: UUID): Boolean =
+        notificationDao.markRead(notificationId, userId)
+
+    override suspend fun markAllRead(userId: UUID): Int =
+        notificationDao.markAllRead(userId)
+
+    private fun parseCursor(cursorCreatedAt: String?, cursorNotificationId: String?): Pair<Instant, UUID>? {
+        if (cursorCreatedAt == null && cursorNotificationId == null) return null
+        require(cursorCreatedAt != null && cursorNotificationId != null) {
+            "Both cursorCreatedAt and cursorNotificationId must be provided together"
+        }
+        val createdAt = runCatching { Instant.parse(cursorCreatedAt) }
+            .getOrElse { throw IllegalArgumentException("Invalid cursorCreatedAt") }
+        val id = runCatching { UUID.fromString(cursorNotificationId) }
+            .getOrElse { throw IllegalArgumentException("Invalid cursorNotificationId") }
+        return createdAt to id
+    }
 }

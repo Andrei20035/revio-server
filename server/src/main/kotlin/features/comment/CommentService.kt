@@ -3,9 +3,14 @@ package features.comment
 import com.revio.server.core.storage.IStorageService
 import com.revio.server.features.comment.dto.CommentDTO
 import com.revio.server.features.comment.dto.toDTO
+import com.revio.server.features.notification.INotificationEventService
+import com.revio.server.features.notification.INotificationOutboxDAO
+import com.revio.server.features.notification.IUserDeviceDAO
+import com.revio.server.features.notification.IUserNotificationPrefsDAO
 import com.revio.server.features.post.IPostDAO
 import com.revio.server.features.scoring.IScoringService
 import org.jetbrains.exposed.exceptions.ExposedSQLException
+import java.time.Instant
 import java.util.UUID
 
 class PostNotFoundException(postId: UUID) : RuntimeException("Post $postId does not exist")
@@ -24,10 +29,31 @@ class CommentService(
     private val storageService: IStorageService,
     private val postDao: IPostDAO,
     private val scoringService: IScoringService,
+    private val notificationEventService: INotificationEventService,
+    private val notificationPrefsDao: IUserNotificationPrefsDAO,
+    private val userDeviceDao: IUserDeviceDAO,
+    private val notificationOutboxDao: INotificationOutboxDAO,
+    private val commentsPushEnabledProvider: () -> String? = { System.getenv("ENABLE_COMMENTS_PUSH") },
 ) : ICommentService {
 
     companion object {
         const val MAX_COMMENT_LENGTH = 1000
+
+        /** Rolling aggregation window for comment notifications (plan §18, step 4.2). */
+        internal const val AGGREGATION_WINDOW_SECONDS = 15L * 60
+
+        /**
+         * Floors [instant] to its 15-minute calendar bucket — the notification aggregation
+         * window's start. Two comments at least [AGGREGATION_WINDOW_SECONDS] apart can never
+         * floor to the same bucket, which is exactly what "a comment 16 minutes later opens a
+         * new window" (this step's acceptance criterion) requires. Internal (not private) so
+         * this exact floor math can be unit-tested directly, same reasoning as
+         * PushDispatchService.classifyResponse/NotificationOutboxProcessor.nextRetryDecision.
+         */
+        internal fun windowStartFor(instant: Instant): Instant {
+            val epochSecond = instant.epochSecond
+            return Instant.ofEpochSecond(epochSecond - (epochSecond % AGGREGATION_WINDOW_SECONDS))
+        }
     }
 
     override suspend fun addComment(userId: UUID, postId: UUID, commentText: String): CommentDTO {
@@ -43,7 +69,10 @@ class CommentService(
 
         return try {
             val comment = commentDao.addComment(userId, postId, text).toResponse()
-            // Award first-commenter points if this is the user's first comment and not a self-comment.
+
+            // Award first-commenter points if this is the user's first comment ever on this post
+            // and not a self-comment. Independent of the notification block below: scoring only
+            // ever fires once per (user, post), but a notification event aggregates every comment.
             if (isFirstComment && ownerInfo != null && ownerInfo.ownerId != userId) {
                 scoringService.onFirstCommentByUser(
                     postOwnerId = ownerInfo.ownerId,
@@ -52,6 +81,37 @@ class CommentService(
                     source = ownerInfo.source,
                 )
             }
+
+            // Notification aggregation (plan §18, step 4.2): one event row per rolling 15-min
+            // window on this post, self-comment excluded (double-checked the same way as
+            // scoring). actor_count only grows when this is the *first* comment this user has
+            // made within the current window — repeat comments from the same user in the same
+            // window are silently absorbed into the row already recorded for their first one,
+            // so "3 comments from the same user" is always exactly 1 actor.
+            if (ownerInfo != null && ownerInfo.ownerId != userId) {
+                val windowStart = windowStartFor(comment.createdAt)
+                val alreadyCountedInWindow = commentDao.hasUserCommentedOnPostInWindow(
+                    userId = userId,
+                    postId = postId,
+                    windowStart = windowStart,
+                    excludingCommentId = comment.id,
+                )
+                if (!alreadyCountedInWindow) {
+                    // recordComment renders title/body itself from the row's actual (race-free)
+                    // actor count — see plan §8.2's thresholds / step 4.3. The comment's own text
+                    // is never passed in, so it can never leak into the rendered copy (D7).
+                    val notificationId = notificationEventService.recordComment(
+                        recipientId = ownerInfo.ownerId,
+                        dedupeKey = "comment:$postId:${windowStart.epochSecond}",
+                        actorId = userId,
+                        actorUsername = comment.username,
+                        postId = postId,
+                        commentId = comment.id,
+                    )
+                    enqueuePushIfEligible(recipientId = ownerInfo.ownerId, notificationId = notificationId)
+                }
+            }
+
             comment
         } catch (e: ExposedSQLException) {
             if (e.sqlState == "23503") throw PostNotFoundException(postId)
@@ -63,11 +123,54 @@ class CommentService(
         val comment = commentDao.getCommentById(commentId)
             ?: throw CommentNotFoundException(commentId)
         if (comment.userId != requesterId) throw CommentForbiddenException()
+
+        val ownerInfo = postDao.getOwnerAndSource(comment.postId)
         commentDao.deleteComment(commentId)
+
+        // Notification cancellation (plan §18, step 4.4): mirrors the same eligibility gate as
+        // creation (self-comment excluded). Only withdraws the actor if this was their *last*
+        // remaining comment in the aggregation window — if they still have another comment there,
+        // their contribution is still represented and nothing changes.
+        if (ownerInfo != null && ownerInfo.ownerId != comment.userId) {
+            val windowStart = windowStartFor(comment.createdAt)
+            val stillHasOtherCommentInWindow = commentDao.hasUserCommentedOnPostInWindow(
+                userId = comment.userId,
+                postId = comment.postId,
+                windowStart = windowStart,
+                excludingCommentId = commentId,
+            )
+            if (!stillHasOtherCommentInWindow) {
+                notificationEventService.withdrawCommentActor(
+                    recipientId = ownerInfo.ownerId,
+                    dedupeKey = "comment:${comment.postId}:${windowStart.epochSecond}",
+                )
+            }
+        }
     }
 
     override suspend fun getCommentsForPost(postId: UUID): List<CommentDTO> =
         commentDao.getCommentsForPost(postId).map { it.toResponse() }
+
+    /**
+     * Fans a just-recorded COMMENTS notification out to the outbox, for internal rollout only
+     * (plan §18, step 4.5): gated first by [commentsPushEnabledProvider] (`ENABLE_COMMENTS_PUSH`,
+     * off by default — this is the "behind flag, rollout intern întâi" switch, independent of any
+     * per-user preference), then by the recipient's own `comments` notification preference. In
+     * either off case, the notification row itself is untouched — it's already been recorded
+     * above and stays in the inbox; only the push attempt is skipped. One outbox row is enqueued
+     * per active device; enqueue is idempotent on (notification_id, device_id), so calling this
+     * again for the same window/device (e.g. a second distinct actor joining before the first
+     * send drains) is harmless.
+     */
+    private suspend fun enqueuePushIfEligible(recipientId: UUID, notificationId: UUID) {
+        if (commentsPushEnabledProvider() != "true") return
+        val prefs = notificationPrefsDao.get(recipientId)
+        if (!prefs.commentsEnabled) return
+
+        userDeviceDao.findActiveByUser(recipientId).forEach { device ->
+            notificationOutboxDao.enqueue(notificationId, device.id)
+        }
+    }
 
     private fun Comment.toResponse(): CommentDTO = toDTO(
         profilePictureUrl = profilePicturePath?.let(storageService::resolveUrl),

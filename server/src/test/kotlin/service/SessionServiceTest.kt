@@ -108,6 +108,7 @@ class SessionServiceTest {
         val capturedNew = slot<NewAuthSession>()
         val fakeSession = sessionWith(credId, refreshTokenHash = "x".repeat(64))
 
+        coEvery { dao.listActiveSessions(credId) } returns emptyList()
         coEvery { dao.replaceActiveSession(capture(capturedNew)) } returns fakeSession
 
         val service = newService(dao)
@@ -133,6 +134,7 @@ class SessionServiceTest {
         val capturedNew = slot<NewAuthSession>()
         val fakeSession = sessionWith(credId, scope = SessionScope.FULL, userId = userId)
 
+        coEvery { dao.listActiveSessions(credId) } returns emptyList()
         coEvery { dao.replaceActiveSession(capture(capturedNew)) } returns fakeSession
 
         val service = newService(dao)
@@ -200,6 +202,9 @@ class SessionServiceTest {
     fun `revokeSession delegates to DAO`() = runTest {
         val dao = mockk<IAuthSessionDAO>()
         val sessionId = UUID.randomUUID()
+        // LOGOUT is a device-deactivating reason, so revokeSession looks the session up first —
+        // returning null here keeps this test scoped to "delegates to DAO", not device deactivation.
+        coEvery { dao.findById(sessionId) } returns null
         coEvery { dao.revokeSession(sessionId, RevokeReason.LOGOUT) } returns 1
 
         newService(dao).revokeSession(sessionId, RevokeReason.LOGOUT)
@@ -214,6 +219,9 @@ class SessionServiceTest {
         val dao = mockk<IAuthSessionDAO>()
         val credId = UUID.randomUUID()
         val exceptId = UUID.randomUUID()
+        // LOGOUT_ALL is a device-deactivating reason, so revokeAllSessions lists active sessions
+        // first — empty here keeps this test scoped to "delegates to DAO", not device deactivation.
+        coEvery { dao.listActiveSessions(credId) } returns emptyList()
         coEvery { dao.revokeActiveByCredential(credId, RevokeReason.LOGOUT_ALL, exceptId) } returns 2
 
         newService(dao).revokeAllSessions(credId, RevokeReason.LOGOUT_ALL, exceptSessionId = exceptId)

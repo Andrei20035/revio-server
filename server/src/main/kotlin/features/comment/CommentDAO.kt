@@ -4,7 +4,10 @@ import com.revio.server.features.comment.CommentTable
 import com.revio.server.features.user.UserTable
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.transactions.transaction
+import java.time.Instant
 import java.util.UUID
 
 interface ICommentDAO {
@@ -18,6 +21,19 @@ interface ICommentDAO {
 
     /** Returns true if [userId] has at least one comment on [postId]. */
     suspend fun hasUserCommentedOnPost(userId: UUID, postId: UUID): Boolean
+
+    /**
+     * True if [userId] has a comment on [postId] created at/after [windowStart], other than
+     * [excludingCommentId] — used to decide whether a just-inserted comment is that user's first
+     * contribution to the current notification aggregation window (plan §18, step 4.2), so a
+     * repeat commenter within the same 15-minute window doesn't inflate the distinct-actor count.
+     */
+    suspend fun hasUserCommentedOnPostInWindow(
+        userId: UUID,
+        postId: UUID,
+        windowStart: Instant,
+        excludingCommentId: UUID,
+    ): Boolean
 }
 
 class CommentDAO : ICommentDAO {
@@ -96,6 +112,24 @@ class CommentDAO : ICommentDAO {
         CommentTable
             .select(CommentTable.id)
             .where { (CommentTable.userId eq userId) and (CommentTable.postId eq postId) }
+            .limit(1)
+            .any()
+    }
+
+    override suspend fun hasUserCommentedOnPostInWindow(
+        userId: UUID,
+        postId: UUID,
+        windowStart: Instant,
+        excludingCommentId: UUID,
+    ): Boolean = transaction {
+        CommentTable
+            .select(CommentTable.id)
+            .where {
+                (CommentTable.userId eq userId) and
+                    (CommentTable.postId eq postId) and
+                    (CommentTable.createdAt greaterEq windowStart) and
+                    (CommentTable.id neq excludingCommentId)
+            }
             .limit(1)
             .any()
     }

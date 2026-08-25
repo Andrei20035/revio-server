@@ -332,4 +332,56 @@ class UserDaoTest {
         }
         assertEquals(listOf("idx_users_phone_number"), indexes)
     }
+
+    // ---------- updateLastFeedOpenIfStale (plan §18, step 6.2) ----------
+
+    private fun lastFeedOpenAtOf(userId: UUID) = transaction {
+        UserTable.selectAll().where { UserTable.id eq userId }.single()[UserTable.lastFeedOpenAt]
+    }
+
+    @Test
+    fun `updateLastFeedOpenIfStale writes when the column is null`() = runTest {
+        val userId = UserTestSeed.seedUser(UserTestSeed.seedAuthCredential("feed1@example.com").authCredentialId, username = "feed1")
+        assertNull(lastFeedOpenAtOf(userId))
+
+        val now = java.time.Instant.now()
+        dao.updateLastFeedOpenIfStale(userId, now = now)
+
+        assertEquals(now, lastFeedOpenAtOf(userId))
+    }
+
+    @Test
+    fun `updateLastFeedOpenIfStale does not overwrite a recent (non-stale) value`() = runTest {
+        val userId = UserTestSeed.seedUser(UserTestSeed.seedAuthCredential("feed2@example.com").authCredentialId, username = "feed2")
+        val firstOpen = java.time.Instant.now()
+        dao.updateLastFeedOpenIfStale(userId, now = firstOpen)
+
+        // 1 minute later, well inside the default 5-minute staleness window.
+        dao.updateLastFeedOpenIfStale(userId, now = firstOpen.plusSeconds(60))
+
+        assertEquals(firstOpen, lastFeedOpenAtOf(userId), "a non-stale value must not be overwritten")
+    }
+
+    @Test
+    fun `updateLastFeedOpenIfStale overwrites once the staleness window has passed`() = runTest {
+        val userId = UserTestSeed.seedUser(UserTestSeed.seedAuthCredential("feed3@example.com").authCredentialId, username = "feed3")
+        val firstOpen = java.time.Instant.now()
+        dao.updateLastFeedOpenIfStale(userId, now = firstOpen)
+
+        val laterOpen = firstOpen.plusSeconds(6 * 60) // past the default 5-minute window
+        dao.updateLastFeedOpenIfStale(userId, now = laterOpen)
+
+        assertEquals(laterOpen, lastFeedOpenAtOf(userId))
+    }
+
+    @Test
+    fun `updateLastFeedOpenIfStale respects a custom staleAfter`() = runTest {
+        val userId = UserTestSeed.seedUser(UserTestSeed.seedAuthCredential("feed4@example.com").authCredentialId, username = "feed4")
+        val firstOpen = java.time.Instant.now()
+        dao.updateLastFeedOpenIfStale(userId, now = firstOpen, staleAfter = java.time.Duration.ofSeconds(30))
+
+        dao.updateLastFeedOpenIfStale(userId, now = firstOpen.plusSeconds(45), staleAfter = java.time.Duration.ofSeconds(30))
+
+        assertEquals(firstOpen.plusSeconds(45), lastFeedOpenAtOf(userId))
+    }
 }
