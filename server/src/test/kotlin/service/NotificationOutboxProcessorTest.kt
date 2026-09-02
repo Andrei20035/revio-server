@@ -1,5 +1,6 @@
 package service
 
+import com.revio.server.config.NotificationMetrics
 import com.revio.server.features.notification.DevicePlatform
 import com.revio.server.features.notification.FcmPriority
 import com.revio.server.features.notification.FcmSendResult
@@ -66,6 +67,7 @@ class NotificationOutboxProcessorTest {
         private val resultFor: (callIndex: Int, fcmToken: String) -> FcmSendResult,
     ) : IPushDispatchService {
         val calls = mutableListOf<String>()
+        val ttlSecondsByCall = mutableListOf<Long?>()
 
         override suspend fun send(
             project: FirebaseProject,
@@ -78,6 +80,7 @@ class NotificationOutboxProcessorTest {
         ): FcmSendResult {
             val index = calls.size
             calls.add(fcmToken)
+            ttlSecondsByCall.add(ttlSeconds)
             return resultFor(index, fcmToken)
         }
     }
@@ -200,6 +203,57 @@ class NotificationOutboxProcessorTest {
         val row = outboxRow(outboxId)
         assertEquals(OutboxState.DROPPED, row[NotificationOutboxTable.state])
         assertTrue(fake.calls.isEmpty(), "FCM must never be called for an already-expired event")
+    }
+
+    // ── step 4.3 — LikeService/DiscoveryJob now send a real expiresAt at enqueue time ────────
+
+    @Test
+    fun `an already-expired event increments the outbox dropped-expired metric`() = runTest {
+        val userId = seedUser("owner-ttl-metric@example.com", "owner_ttl_metric")
+        seedDevice(userId, "device-ttl-metric", "token-ttl-metric")
+        val notificationId = seedNotification(userId, "like:post-ttl-metric:w1")
+        val device = deviceDao.findByUserAndDevice(userId, "device-ttl-metric")!!
+        outboxDao.enqueue(
+            notificationId,
+            device.id,
+            expiresAt = Instant.now().atOffset(ZoneOffset.UTC).minusHours(1),
+        )
+
+        val before = NotificationMetrics.snapshot().outboxDroppedExpired
+        val fake = FakePushDispatchService { _, _ -> FcmSendResult.Accepted("should-not-be-used") }
+        val processor = NotificationOutboxProcessor(outboxDao, deviceDao, fake, leaderboardDao, leaderboardDeltaService)
+
+        processor.processDueBatch()
+
+        assertEquals(before + 1, NotificationMetrics.snapshot().outboxDroppedExpired)
+    }
+
+    @Test
+    fun `a row with a future expiresAt is sent with a matching android_ttl`() = runTest {
+        val userId = seedUser("owner-ttl-valid@example.com", "owner_ttl_valid")
+        seedDevice(userId, "device-ttl-valid", "token-ttl-valid")
+        val notificationId = seedNotification(userId, "like:post-ttl-valid:w1")
+        val device = deviceDao.findByUserAndDevice(userId, "device-ttl-valid")!!
+        // Mirrors LikeService's LIKE_NOTIFICATION_FRESHNESS_HOURS (6h) freshness TTL.
+        outboxDao.enqueue(
+            notificationId,
+            device.id,
+            expiresAt = Instant.now().atOffset(ZoneOffset.UTC).plusHours(6),
+        )
+
+        val fake = FakePushDispatchService { _, _ -> FcmSendResult.Accepted("msg-ttl-valid") }
+        val processor = NotificationOutboxProcessor(outboxDao, deviceDao, fake, leaderboardDao, leaderboardDeltaService)
+
+        processor.processDueBatch()
+
+        assertEquals(1, fake.calls.size)
+        val ttlSeconds = fake.ttlSecondsByCall.single()
+        assertTrue(ttlSeconds != null, "expected android.ttl to be set for a row with a future expiresAt")
+        // ~6h in seconds, allowing slack for the test's own execution time.
+        assertTrue(ttlSeconds!! in (6L * 3600 - 60)..(6L * 3600), "expected ~6h of ttl, was ${ttlSeconds}s")
+
+        val row = outboxRow(outboxDao.find(notificationId, device.id)!!.id)
+        assertEquals(OutboxState.ACCEPTED, row[NotificationOutboxTable.state])
     }
 
     @Test

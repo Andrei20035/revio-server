@@ -107,8 +107,12 @@ class DiscoveryJob(
                 body = "See what the community found.",
             )
 
+            // Freshness TTL (step 4.3), matching DISCOVERY_MAX_DEFER_HOURS's own reasoning
+            // (plan §8.3: "un 'today's spots' livrat mâine dimineață e mort") — the processor
+            // drops rather than sends a digest that's gone stale waiting in the queue.
+            val expiresAt = nowOffset.plusHours(DISCOVERY_MAX_DEFER_HOURS)
             userDeviceDao.findActiveByUser(candidate.userId).forEach { device ->
-                notificationOutboxDao.enqueue(notificationId, device.id, notBefore = decision.notBefore)
+                notificationOutboxDao.enqueue(notificationId, device.id, notBefore = decision.notBefore, expiresAt = expiresAt)
             }
             sent++
         }

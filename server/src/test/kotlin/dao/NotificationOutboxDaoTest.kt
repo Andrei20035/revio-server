@@ -3,6 +3,8 @@ package dao
 import com.revio.server.features.notification.DevicePlatform
 import com.revio.server.features.notification.FirebaseProject
 import com.revio.server.features.notification.NotificationDAO
+import com.revio.server.features.notification.NotificationCategory
+import com.revio.server.features.notification.NotificationEventService
 import com.revio.server.features.notification.NotificationOutboxDAO
 import com.revio.server.features.notification.NotificationOutboxTable
 import com.revio.server.features.notification.NotificationTable
@@ -33,6 +35,7 @@ class NotificationOutboxDaoTest {
 
     private val outboxDao = NotificationOutboxDAO()
     private val notificationDao = NotificationDAO()
+    private val notificationEventService = NotificationEventService()
     private val deviceDao = UserDeviceDAO()
 
     @BeforeAll
@@ -55,6 +58,17 @@ class NotificationOutboxDaoTest {
 
     private suspend fun seedNotification(userId: UUID): UUID =
         notificationDao.insert(userId, NotificationType.POST_REMOVED, "title", "body", blocking = false)
+
+    private fun seedNotification(userId: UUID, category: NotificationCategory): UUID =
+        notificationEventService.record(
+            recipientId = userId,
+            category = category,
+            dedupeKey = "${category.name.lowercase()}:${UUID.randomUUID()}",
+            actorId = null,
+            actorUsername = null,
+            title = "title",
+            body = "body",
+        )
 
     private suspend fun seedDevice(userId: UUID, deviceId: String = "device-1"): UUID =
         deviceDao.registerDevice(
@@ -150,5 +164,37 @@ class NotificationOutboxDaoTest {
         outboxDao.markAccepted(acceptedEntry.id, "projects/x/messages/1")
 
         assertEquals(2, outboxDao.countQueued())
+    }
+
+    @Test
+    fun `accepted notification counts are distinct per event and filtered by category`() = runTest {
+        val userId = seedUser()
+        val deviceA = seedDevice(userId, "d-count-a")
+        val deviceB = seedDevice(userId, "d-count-b")
+        val likeId = seedNotification(userId, NotificationCategory.LIKES)
+        val commentId = seedNotification(userId, NotificationCategory.COMMENTS)
+        val pendingLikeId = seedNotification(userId, NotificationCategory.LIKES)
+
+        outboxDao.enqueue(likeId, deviceA)
+        outboxDao.enqueue(likeId, deviceB)
+        outboxDao.enqueue(commentId, deviceA)
+        outboxDao.enqueue(pendingLikeId, deviceA)
+        outboxDao.markAccepted(outboxDao.find(likeId, deviceA)!!.id, "messages/like-a")
+        outboxDao.markAccepted(outboxDao.find(likeId, deviceB)!!.id, "messages/like-b")
+        outboxDao.markAccepted(outboxDao.find(commentId, deviceA)!!.id, "messages/comment")
+
+        val since = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(1)
+        assertEquals(
+            1,
+            outboxDao.countAcceptedNotificationsSince(userId, setOf(NotificationCategory.LIKES), since),
+        )
+        assertEquals(
+            2,
+            outboxDao.countAcceptedNotificationsSince(
+                userId,
+                setOf(NotificationCategory.LIKES, NotificationCategory.COMMENTS),
+                since,
+            ),
+        )
     }
 }

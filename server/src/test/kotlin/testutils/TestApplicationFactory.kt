@@ -79,6 +79,10 @@ import com.revio.server.features.moderation.OrphanedStorageObjectDAO
 import com.revio.server.features.moderation.moderationAdminRoutes
 import com.revio.server.features.notification.DeviceRegistryService
 import com.revio.server.features.notification.IDeviceRegistryService
+import com.revio.server.features.notification.IDiscoveryJob
+import com.revio.server.features.notification.DiscoveryRunResult
+import com.revio.server.features.notification.IInactivityJob
+import com.revio.server.features.notification.InactivityRunResult
 import com.revio.server.features.notification.INotificationDAO
 import com.revio.server.features.notification.INotificationEventService
 import com.revio.server.features.notification.INotificationOutboxDAO
@@ -94,6 +98,8 @@ import com.revio.server.features.notification.NotificationService
 import com.revio.server.features.notification.UserDeviceDAO
 import com.revio.server.features.notification.UserNotificationPrefsDAO
 import com.revio.server.features.notification.deviceRoutes
+import com.revio.server.features.notification.discoveryRoutes
+import com.revio.server.features.notification.inactivityRoutes
 import com.revio.server.features.notification.notificationPrefsRoutes
 import com.revio.server.features.notification.notificationRoutes
 import com.revio.server.features.post.IPostDAO
@@ -971,6 +977,55 @@ fun Application.testWaitlistModule(cronSecret: String? = null, webhookSecret: St
     routing {
         route("/api") {
             waitlistRoutes(cronSecretProvider = { cronSecret }, webhookSecretProvider = { webhookSecret })
+        }
+    }
+}
+
+/**
+ * [IInactivityJob] is mocked — route tests here exercise the `X-Cron-Secret` gate and response
+ * shape, not the job's own eligibility logic, which is already covered end-to-end by
+ * InactivityJobTest.
+ */
+fun Application.testInactivityModule(cronSecret: String? = null) {
+    val koinTestModule = module {
+        single<IInactivityJob> {
+            mockk<IInactivityJob>().also {
+                coEvery { it.run(any()) } returns InactivityRunResult(evaluated = 0, sent = 0, skipped = 0)
+            }
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            inactivityRoutes(cronSecretProvider = { cronSecret })
+        }
+    }
+}
+
+fun Application.testDiscoveryModule(cronSecret: String? = null) {
+    val koinTestModule = module {
+        single<IDiscoveryJob> {
+            mockk<IDiscoveryJob>().also {
+                coEvery { it.run(any()) } returns DiscoveryRunResult(evaluated = 0, sent = 0, skipped = 0)
+            }
+        }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            discoveryRoutes(cronSecretProvider = { cronSecret })
         }
     }
 }

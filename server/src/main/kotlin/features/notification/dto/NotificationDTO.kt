@@ -21,6 +21,8 @@ data class NotificationDTO(
     val createdAt: Instant,
     @Serializable(with = InstantSerializer::class)
     val readAt: Instant? = null,
+    @Serializable(with = InstantSerializer::class)
+    val updatedAt: Instant,
     val category: NotificationCategory = NotificationCategory.ACCOUNT,
     /** Target spot for a LIKES/COMMENTS row (D3 deep link) — null for a non-social row, or a tombstone. */
     @Serializable(with = UUIDSerializer::class)
@@ -38,6 +40,7 @@ fun Notification.toDTO() = NotificationDTO(
     blocking = blocking,
     createdAt = createdAt,
     readAt = readAt,
+    updatedAt = updatedAt,
     category = category,
     postId = postId,
     commentId = commentId,

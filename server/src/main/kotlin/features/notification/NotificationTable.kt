@@ -19,6 +19,14 @@ enum class NotificationCategory {
     COMMENTS,
     DISCOVERY,
     REMINDERS,
+    ;
+
+    companion object {
+        /** Parses a `?category=` query param. @throws IllegalArgumentException on an unknown value. */
+        fun fromParam(value: String): NotificationCategory =
+            entries.find { it.name == value }
+                ?: throw IllegalArgumentException("Invalid category")
+    }
 }
 
 /** What a notification's deep link points at, if anything. */

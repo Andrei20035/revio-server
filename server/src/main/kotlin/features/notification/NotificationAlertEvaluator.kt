@@ -18,7 +18,8 @@ enum class NotificationAlert {
     UNREGISTERED_RATE_HIGH,
 }
 
-private const val QUEUE_DEPTH_THRESHOLD = 1000
+/** Visible to [NotificationAlertEvaluatorLoop] (step 4.4), which tracks how long depth has stayed above this same threshold across ticks. */
+internal const val QUEUE_DEPTH_THRESHOLD = 1000
 private val QUEUE_DEPTH_SUSTAIN_MS = java.time.Duration.ofMinutes(5).toMillis()
 private const val DEAD_RATE_THRESHOLD = 0.05
 private val COMMENTS_AGE_P95_THRESHOLD_MS = java.time.Duration.ofMinutes(10).toMillis()

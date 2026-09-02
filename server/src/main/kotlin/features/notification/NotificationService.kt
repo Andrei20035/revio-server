@@ -28,19 +28,32 @@ interface INotificationService {
      * [limit] items (already validated/clamped by the caller). [cursorCreatedAt]/[cursorNotificationId]
      * must both be null (first page) or both be present (subsequent page) — a partial pair throws
      * [IllegalArgumentException], mirroring [com.revio.server.features.post.PostService]'s feed cursor.
+     *
+     * @param category when non-null, restricts both the page and the unread count to that
+     *   category (e.g. ACCOUNT for the Notices inbox); null returns every category, unchanged
+     *   from prior behavior.
      */
     suspend fun listForUserPage(
         userId: UUID,
         limit: Int,
         cursorCreatedAt: String?,
         cursorNotificationId: String?,
+        category: NotificationCategory? = null,
     ): NotificationListResponseDTO
 
     /** [INotificationDAO.markRead] — see that doc; scoped to [userId] so one user can't mark another's read. */
     suspend fun markRead(notificationId: UUID, userId: UUID): Boolean
 
-    /** [INotificationDAO.markAllRead]. */
-    suspend fun markAllRead(userId: UUID): Int
+    /**
+     * [INotificationDAO.markAllRead].
+     *
+     * @param category when non-null, restricts the update to that category, and — matching
+     *   [INotificationDAO.markAllRead]'s `includeBlocking` doc — leaves `blocking = true` rows
+     *   untouched, since a category-scoped read-all is the Notices inbox opening, not an explicit
+     *   moderation-dialog acknowledgement. Null updates every category including blocking rows,
+     *   unchanged from prior behavior.
+     */
+    suspend fun markAllRead(userId: UUID, category: NotificationCategory? = null): Int
 }
 
 class NotificationService(
@@ -81,12 +94,13 @@ class NotificationService(
         limit: Int,
         cursorCreatedAt: String?,
         cursorNotificationId: String?,
+        category: NotificationCategory?,
     ): NotificationListResponseDTO {
         val cursor = parseCursor(cursorCreatedAt, cursorNotificationId)
 
         // Fetch one extra row to determine whether another page exists, exactly as
         // PostService.listFeed does for the feed's own keyset cursor.
-        val rows = notificationDao.listForUserAfter(userId, limit + 1, cursor?.first, cursor?.second)
+        val rows = notificationDao.listForUserAfter(userId, limit + 1, cursor?.first, cursor?.second, category)
         val hasMore = rows.size > limit
         val page = if (hasMore) rows.take(limit) else rows
 
@@ -96,7 +110,7 @@ class NotificationService(
             null
         }
 
-        val unreadCount = notificationDao.countUnread(userId)
+        val unreadCount = notificationDao.countUnread(userId, category)
 
         return NotificationListResponseDTO(
             unreadCount = unreadCount,
@@ -109,8 +123,8 @@ class NotificationService(
     override suspend fun markRead(notificationId: UUID, userId: UUID): Boolean =
         notificationDao.markRead(notificationId, userId)
 
-    override suspend fun markAllRead(userId: UUID): Int =
-        notificationDao.markAllRead(userId)
+    override suspend fun markAllRead(userId: UUID, category: NotificationCategory?): Int =
+        notificationDao.markAllRead(userId, category, includeBlocking = category == null)
 
     private fun parseCursor(cursorCreatedAt: String?, cursorNotificationId: String?): Pair<Instant, UUID>? {
         if (cursorCreatedAt == null && cursorNotificationId == null) return null

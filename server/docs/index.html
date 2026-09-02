@@ -1635,6 +1635,104 @@
   },
   "description" : "Response for GET /challenges/me."
 };
+            defs["NotificationCategory"] = {
+  "type" : "string",
+  "description" : "ACCOUNT covers moderation notices (post removal, ban, violation revocation); the rest are the social/broadcast categories.\n",
+  "enum" : [ "ACCOUNT", "LIKES", "COMMENTS", "DISCOVERY", "REMINDERS" ]
+};
+            defs["NotificationCursorDTO"] = {
+  "required" : [ "lastCreatedAt", "lastNotificationId" ],
+  "type" : "object",
+  "properties" : {
+    "lastCreatedAt" : {
+      "type" : "string",
+      "format" : "date-time"
+    },
+    "lastNotificationId" : {
+      "type" : "string",
+      "format" : "uuid"
+    }
+  }
+};
+            defs["NotificationDTO"] = {
+  "required" : [ "blocking", "body", "category", "createdAt", "id", "title", "type", "updatedAt" ],
+  "type" : "object",
+  "properties" : {
+    "id" : {
+      "type" : "string",
+      "format" : "uuid"
+    },
+    "type" : {
+      "$ref" : "#/components/schemas/NotificationType"
+    },
+    "title" : {
+      "type" : "string"
+    },
+    "body" : {
+      "type" : "string"
+    },
+    "blocking" : {
+      "type" : "boolean",
+      "description" : "When true, the client must present this notice as a dialog the user cannot dismiss without acknowledging.\n"
+    },
+    "createdAt" : {
+      "type" : "string",
+      "format" : "date-time"
+    },
+    "readAt" : {
+      "type" : "string",
+      "format" : "date-time",
+      "nullable" : true
+    },
+    "updatedAt" : {
+      "type" : "string",
+      "format" : "date-time"
+    },
+    "category" : {
+      "$ref" : "#/components/schemas/NotificationCategory"
+    },
+    "postId" : {
+      "type" : "string",
+      "format" : "uuid",
+      "nullable" : true
+    },
+    "commentId" : {
+      "type" : "string",
+      "format" : "uuid",
+      "nullable" : true
+    },
+    "deepLink" : {
+      "type" : "string",
+      "nullable" : true
+    }
+  }
+};
+            defs["NotificationListResponseDTO"] = {
+  "required" : [ "items", "unreadCount" ],
+  "type" : "object",
+  "properties" : {
+    "unreadCount" : {
+      "type" : "integer",
+      "format" : "int64"
+    },
+    "items" : {
+      "type" : "array",
+      "items" : {
+        "$ref" : "#/components/schemas/NotificationDTO"
+      }
+    },
+    "nextCursor" : {
+      "$ref" : "#/components/schemas/NotificationCursorDTO"
+    },
+    "hasMore" : {
+      "type" : "boolean"
+    }
+  }
+};
+            defs["NotificationType"] = {
+  "type" : "string",
+  "enum" : [ "POST_REMOVED", "ACCOUNT_SUSPENDED", "ACCOUNT_UNSUSPENDED", "VIOLATION_REVOKED", "CHALLENGE_REWARD_REVOKED", "SOCIAL" ]
+};
             defs["OnboardingStep"] = {
   "type" : "string",
   "enum" : [ "PROFILE_REQUIRED", "COMPLETED" ]
@@ -2537,6 +2635,16 @@
                     </li>
                     <li data-group="Likes" data-name="postsPostIdLikesPost" class="">
                       <a href="#api-Likes-postsPostIdLikesPost">postsPostIdLikesPost</a>
+                    </li>
+                  <li class="nav-header" data-group="Notifications"><a href="#api-Notifications">API Methods - Notifications</a></li>
+                    <li data-group="Notifications" data-name="notificationsGet" class="">
+                      <a href="#api-Notifications-notificationsGet">notificationsGet</a>
+                    </li>
+                    <li data-group="Notifications" data-name="notificationsIdReadPost" class="">
+                      <a href="#api-Notifications-notificationsIdReadPost">notificationsIdReadPost</a>
+                    </li>
+                    <li data-group="Notifications" data-name="notificationsReadAllPost" class="">
+                      <a href="#api-Notifications-notificationsReadAllPost">notificationsReadAllPost</a>
                     </li>
                   <li class="nav-header" data-group="Posts"><a href="#api-Posts">API Methods - Posts</a></li>
                     <li data-group="Posts" data-name="postsFeedGet" class="">
@@ -28247,6 +28355,1253 @@ except ApiException as e:
                                   </div>
                                   <input id='responses-postsPostIdLikesPost-404-schema-data' type='hidden' value=''></input>
                                 </div>
+                            </div>
+
+                        </article>
+                      </div>
+                      <hr>
+                  </section>
+                <section id="api-Notifications">
+                  <h1>Notifications</h1>
+                    <div id="api-Notifications-notificationsGet">
+                      <article id="api-Notifications-notificationsGet-0" data-group="User" data-name="notificationsGet" data-version="0">
+                        <div class="pull-left">
+                          <h1>notificationsGet</h1>
+                          <p>Get notifications</p>
+                        </div>
+                        <div class="pull-right"></div>
+                        <div class="clearfix"></div>
+                        <p></p>
+                        <p class="marked">Keyset-paginated notifications for the calling user, newest first, plus the unread count. &#x60;cursorCreatedAt&#x60; and &#x60;cursorNotificationId&#x60; must both be provided together (subsequent page) or both omitted (first page).
+</p>
+                        <p></p>
+                        <br />
+                        <pre class="prettyprint language-html prettyprinted" data-type="get"><code><span class="pln">/notifications</span></code></pre>
+                        <p>
+                          <h3>Usage and SDK Samples</h3>
+                        </p>
+                        <ul class="nav nav-tabs nav-tabs-examples">
+                          <li class="active"><a href="#examples-Notifications-notificationsGet-0-curl">Curl</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-java">Java</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-android">Android</a></li>
+                          <!--<li class=""><a href="#examples-Notifications-notificationsGet-0-groovy">Groovy</a></li>-->
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-objc">Obj-C</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-javascript">JavaScript</a></li>
+                          <!--<li class=""><a href="#examples-Notifications-notificationsGet-0-angular">Angular</a></li>-->
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-csharp">C#</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-php">PHP</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-perl">Perl</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsGet-0-python">Python</a></li>
+                        </ul>
+
+                        <div class="tab-content">
+                          <div class="tab-pane active" id="examples-Notifications-notificationsGet-0-curl">
+                           <pre class="prettyprint"><code class="language-bsh">curl -X GET\
+ -H "Authorization: Bearer [[accessToken]]"\
+-H "Accept: application/json"\
+"/api/notifications?limit=&cursorCreatedAt=&cursorNotificationId=&category="</code></pre>
+                          </div>
+                          <div class="tab-pane" id="examples-Notifications-notificationsGet-0-java">
+                            <pre class="prettyprint"><code class="language-java">import io.swagger.client.*;
+import io.swagger.client.auth.*;
+import io.swagger.client.model.*;
+import io.swagger.client.api.NotificationsApi;
+
+import java.io.File;
+import java.util.*;
+
+public class NotificationsApiExample {
+
+    public static void main(String[] args) {
+        ApiClient defaultClient = Configuration.getDefaultApiClient();
+
+
+        NotificationsApi apiInstance = new NotificationsApi();
+        Integer limit = 56; // Integer | Coerced into 1..200
+        Date cursorCreatedAt = 2013-10-20T19:20:30+01:00; // Date | Opaque cursor field from a previous response's `nextCursor.lastCreatedAt`
+        UUID cursorNotificationId = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // UUID | Opaque cursor field from a previous response's `nextCursor.lastNotificationId`
+        NotificationCategory category = ; // NotificationCategory | Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+
+        try {
+            NotificationListResponseDTO result = apiInstance.notificationsGet(limit, cursorCreatedAt, cursorNotificationId, category);
+            System.out.println(result);
+        } catch (ApiException e) {
+            System.err.println("Exception when calling NotificationsApi#notificationsGet");
+            e.printStackTrace();
+        }
+    }
+}</code></pre>
+                          </div>
+
+                          <div class="tab-pane" id="examples-Notifications-notificationsGet-0-android">
+                            <pre class="prettyprint"><code class="language-java">import io.swagger.client.api.NotificationsApi;
+
+public class NotificationsApiExample {
+
+    public static void main(String[] args) {
+        NotificationsApi apiInstance = new NotificationsApi();
+        Integer limit = 56; // Integer | Coerced into 1..200
+        Date cursorCreatedAt = 2013-10-20T19:20:30+01:00; // Date | Opaque cursor field from a previous response's `nextCursor.lastCreatedAt`
+        UUID cursorNotificationId = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // UUID | Opaque cursor field from a previous response's `nextCursor.lastNotificationId`
+        NotificationCategory category = ; // NotificationCategory | Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+
+        try {
+            NotificationListResponseDTO result = apiInstance.notificationsGet(limit, cursorCreatedAt, cursorNotificationId, category);
+            System.out.println(result);
+        } catch (ApiException e) {
+            System.err.println("Exception when calling NotificationsApi#notificationsGet");
+            e.printStackTrace();
+        }
+    }
+}</code></pre>
+                          </div>
+  <!--
+  <div class="tab-pane" id="examples-Notifications-notificationsGet-0-groovy">
+  <pre class="prettyprint language-json prettyprinted" data-type="json"><code>Coming Soon!</code></pre>
+  </div> -->
+                            <div class="tab-pane" id="examples-Notifications-notificationsGet-0-objc">
+                              <pre class="prettyprint"><code class="language-cpp">Configuration *apiConfig = [Configuration sharedConfig];
+Integer *limit = 56; // Coerced into 1..200 (optional) (default to 50)
+Date *cursorCreatedAt = 2013-10-20T19:20:30+01:00; // Opaque cursor field from a previous response's `nextCursor.lastCreatedAt` (optional)
+UUID *cursorNotificationId = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // Opaque cursor field from a previous response's `nextCursor.lastNotificationId` (optional)
+NotificationCategory *category = ; // Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+ (optional)
+
+NotificationsApi *apiInstance = [[NotificationsApi alloc] init];
+
+// Get notifications
+[apiInstance notificationsGetWith:limit
+    cursorCreatedAt:cursorCreatedAt
+    cursorNotificationId:cursorNotificationId
+    category:category
+              completionHandler: ^(NotificationListResponseDTO output, NSError* error) {
+                            if (output) {
+                                NSLog(@"%@", output);
+                            }
+                            if (error) {
+                                NSLog(@"Error: %@", error);
+                            }
+                        }];
+</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsGet-0-javascript">
+                              <pre class="prettyprint"><code class="language-js">var RevioApi = require('revio_api');
+var defaultClient = RevioApi.ApiClient.instance;
+
+
+var api = new RevioApi.NotificationsApi()
+var opts = { 
+  'limit': 56, // {{Integer}} Coerced into 1..200
+  'cursorCreatedAt': 2013-10-20T19:20:30+01:00, // {{Date}} Opaque cursor field from a previous response's `nextCursor.lastCreatedAt`
+  'cursorNotificationId': 38400000-8cf0-11bd-b23e-10b96e4ef00d, // {{UUID}} Opaque cursor field from a previous response's `nextCursor.lastNotificationId`
+  'category':  // {{NotificationCategory}} Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+
+};
+var callback = function(error, data, response) {
+  if (error) {
+    console.error(error);
+  } else {
+    console.log('API called successfully. Returned data: ' + data);
+  }
+};
+api.notificationsGet(opts, callback);
+</code></pre>
+                            </div>
+
+                            <!--<div class="tab-pane" id="examples-Notifications-notificationsGet-0-angular">
+              <pre class="prettyprint language-json prettyprinted" data-type="json"><code>Coming Soon!</code></pre>
+            </div>-->
+                            <div class="tab-pane" id="examples-Notifications-notificationsGet-0-csharp">
+                              <pre class="prettyprint"><code class="language-cs">using System;
+using System.Diagnostics;
+using IO.Swagger.Api;
+using IO.Swagger.Client;
+using IO.Swagger.Model;
+
+namespace Example
+{
+    public class notificationsGetExample
+    {
+        public void main()
+        {
+
+
+            var apiInstance = new NotificationsApi();
+            var limit = 56;  // Integer | Coerced into 1..200 (optional)  (default to 50)
+            var cursorCreatedAt = 2013-10-20T19:20:30+01:00;  // Date | Opaque cursor field from a previous response's `nextCursor.lastCreatedAt` (optional) 
+            var cursorNotificationId = new UUID(); // UUID | Opaque cursor field from a previous response's `nextCursor.lastNotificationId` (optional) 
+            var category = new NotificationCategory(); // NotificationCategory | Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+ (optional) 
+
+            try
+            {
+                // Get notifications
+                NotificationListResponseDTO result = apiInstance.notificationsGet(limit, cursorCreatedAt, cursorNotificationId, category);
+                Debug.WriteLine(result);
+            }
+            catch (Exception e)
+            {
+                Debug.Print("Exception when calling NotificationsApi.notificationsGet: " + e.Message );
+            }
+        }
+    }
+}
+</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsGet-0-php">
+                              <pre class="prettyprint"><code class="language-php"><&#63;php
+require_once(__DIR__ . '/vendor/autoload.php');
+
+
+$api_instance = new Swagger\Client\ApiNotificationsApi();
+$limit = 56; // Integer | Coerced into 1..200
+$cursorCreatedAt = 2013-10-20T19:20:30+01:00; // Date | Opaque cursor field from a previous response's `nextCursor.lastCreatedAt`
+$cursorNotificationId = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // UUID | Opaque cursor field from a previous response's `nextCursor.lastNotificationId`
+$category = ; // NotificationCategory | Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+
+
+try {
+    $result = $api_instance->notificationsGet($limit, $cursorCreatedAt, $cursorNotificationId, $category);
+    print_r($result);
+} catch (Exception $e) {
+    echo 'Exception when calling NotificationsApi->notificationsGet: ', $e->getMessage(), PHP_EOL;
+}
+?></code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsGet-0-perl">
+                              <pre class="prettyprint"><code class="language-perl">use Data::Dumper;
+use WWW::SwaggerClient::Configuration;
+use WWW::SwaggerClient::NotificationsApi;
+
+
+my $api_instance = WWW::SwaggerClient::NotificationsApi->new();
+my $limit = 56; # Integer | Coerced into 1..200
+my $cursorCreatedAt = 2013-10-20T19:20:30+01:00; # Date | Opaque cursor field from a previous response's `nextCursor.lastCreatedAt`
+my $cursorNotificationId = 38400000-8cf0-11bd-b23e-10b96e4ef00d; # UUID | Opaque cursor field from a previous response's `nextCursor.lastNotificationId`
+my $category = ; # NotificationCategory | Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+
+
+eval { 
+    my $result = $api_instance->notificationsGet(limit => $limit, cursorCreatedAt => $cursorCreatedAt, cursorNotificationId => $cursorNotificationId, category => $category);
+    print Dumper($result);
+};
+if ($@) {
+    warn "Exception when calling NotificationsApi->notificationsGet: $@\n";
+}</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsGet-0-python">
+                              <pre class="prettyprint"><code class="language-python">from __future__ import print_statement
+import time
+import swagger_client
+from swagger_client.rest import ApiException
+from pprint import pprint
+
+
+# create an instance of the API class
+api_instance = swagger_client.NotificationsApi()
+limit = 56 # Integer | Coerced into 1..200 (optional) (default to 50)
+cursorCreatedAt = 2013-10-20T19:20:30+01:00 # Date | Opaque cursor field from a previous response's `nextCursor.lastCreatedAt` (optional)
+cursorNotificationId = 38400000-8cf0-11bd-b23e-10b96e4ef00d # UUID | Opaque cursor field from a previous response's `nextCursor.lastNotificationId` (optional)
+category =  # NotificationCategory | Restricts the page and `unreadCount` to one category. Omitted returns every category (default, unfiltered).
+ (optional)
+
+try: 
+    # Get notifications
+    api_response = api_instance.notifications_get(limit=limit, cursorCreatedAt=cursorCreatedAt, cursorNotificationId=cursorNotificationId, category=category)
+    pprint(api_response)
+except ApiException as e:
+    print("Exception when calling NotificationsApi->notificationsGet: %s\n" % e)</code></pre>
+                            </div>
+                          </div>
+
+                          <h2>Parameters</h2>
+
+
+
+
+
+                            <div class="methodsubtabletitle">Query parameters</div>
+                            <table id="methodsubtable">
+                              <tr>
+                                <th width="150px">Name</th>
+                                <th>Description</th>
+                              </tr>
+                                <tr><td style="width:150px;">limit</td>
+                                <td>
+                                
+                                
+                                    <div id="d2e199_notificationsGet_limit">
+                                        <div class="json-schema-view">
+                                            <div class="primitive">
+                                                <span class="type">
+                                                    Integer
+                                                </span>
+                                
+                                                    <div class="inner description">
+                                                        Coerced into 1..200
+                                                    </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+                                </tr>
+                                <tr><td style="width:150px;">cursorCreatedAt</td>
+                                <td>
+                                
+                                
+                                    <div id="d2e199_notificationsGet_cursorCreatedAt">
+                                        <div class="json-schema-view">
+                                            <div class="primitive">
+                                                <span class="type">
+                                                    Date
+                                                </span>
+                                                    <span class="format">
+                                                        (date-time)
+                                                    </span>
+                                
+                                                    <div class="inner description">
+                                                        Opaque cursor field from a previous response&#x27;s &#x60;nextCursor.lastCreatedAt&#x60;
+                                                    </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+                                </tr>
+                                <tr><td style="width:150px;">cursorNotificationId</td>
+                                <td>
+                                
+                                
+                                    <div id="d2e199_notificationsGet_cursorNotificationId">
+                                        <div class="json-schema-view">
+                                            <div class="primitive">
+                                                <span class="type">
+                                                    UUID
+                                                </span>
+                                                    <span class="format">
+                                                        (uuid)
+                                                    </span>
+                                
+                                                    <div class="inner description">
+                                                        Opaque cursor field from a previous response&#x27;s &#x60;nextCursor.lastNotificationId&#x60;
+                                                    </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+                                </tr>
+                                <tr><td style="width:150px;">category</td>
+                                <td>
+                                
+                                
+                                    <div id="d2e199_notificationsGet_category">
+                                        <div class="json-schema-view">
+                                            <div class="primitive">
+                                                <span class="type">
+                                                    NotificationCategory
+                                                </span>
+                                
+                                                    <div class="inner description">
+                                                        Restricts the page and &#x60;unreadCount&#x60; to one category. Omitted returns every category (default, unfiltered).
+
+                                                    </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+                                </tr>
+                            </table>
+
+                          <h2>Responses</h2>
+                            <h3> Status: 200 - Notifications page </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                                <li class="active">
+                                  <a data-toggle="tab" href="#responses-notificationsGet-200-schema">Schema</a>
+                                </li>
+
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                                <div class="tab-pane active" id="responses-notificationsGet-200-schema">
+                                  <div id='responses-notificationsGet-200-schema-200' style="padding: 30px; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
+                                    <script>
+                                      $(document).ready(function() {
+                                        var schemaWrapper = {
+  "description" : "Notifications page",
+  "content" : {
+    "application/json" : {
+      "schema" : {
+        "$ref" : "#/components/schemas/NotificationListResponseDTO"
+      }
+    }
+  }
+};
+                                        var schema = schemaWrapper.content["application/json"].schema;
+                                        if (schema.$ref != null) {
+                                          schema = defsParser.$refs.get(schema.$ref);
+                                        } else {
+                                          schemaWrapper.components = {};
+                                          schemaWrapper.components.schemas = Object.assign({}, defs);
+                                          $RefParser.dereference(schemaWrapper).catch(function(err) {
+                                            console.log(err);
+                                          });
+                                        }
+
+                                        //console.log(JSON.stringify(schema));
+                                        var view = new JSONSchemaView(schema, 3);
+                                        $('#responses-notificationsGet-200-schema-data').val(stringify(schema));
+                                        var result = $('#responses-notificationsGet-200-schema-200');
+                                        result.empty();
+                                        result.append(view.render());
+                                      });
+                                    </script>
+                                  </div>
+                                  <input id='responses-notificationsGet-200-schema-data' type='hidden' value=''></input>
+                                </div>
+                            </div>
+
+                            <h3> Status: 400 - Partial cursor pair, malformed cursor value, or unrecognized category </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                                <li class="active">
+                                  <a data-toggle="tab" href="#responses-notificationsGet-400-schema">Schema</a>
+                                </li>
+
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                                <div class="tab-pane active" id="responses-notificationsGet-400-schema">
+                                  <div id='responses-notificationsGet-400-schema-400' style="padding: 30px; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
+                                    <script>
+                                      $(document).ready(function() {
+                                        var schemaWrapper = {
+  "description" : "Partial cursor pair, malformed cursor value, or unrecognized category",
+  "content" : {
+    "application/json" : {
+      "schema" : {
+        "$ref" : "#/components/schemas/ErrorResponse"
+      }
+    }
+  }
+};
+                                        var schema = schemaWrapper.content["application/json"].schema;
+                                        if (schema.$ref != null) {
+                                          schema = defsParser.$refs.get(schema.$ref);
+                                        } else {
+                                          schemaWrapper.components = {};
+                                          schemaWrapper.components.schemas = Object.assign({}, defs);
+                                          $RefParser.dereference(schemaWrapper).catch(function(err) {
+                                            console.log(err);
+                                          });
+                                        }
+
+                                        //console.log(JSON.stringify(schema));
+                                        var view = new JSONSchemaView(schema, 3);
+                                        $('#responses-notificationsGet-400-schema-data').val(stringify(schema));
+                                        var result = $('#responses-notificationsGet-400-schema-400');
+                                        result.empty();
+                                        result.append(view.render());
+                                      });
+                                    </script>
+                                  </div>
+                                  <input id='responses-notificationsGet-400-schema-data' type='hidden' value=''></input>
+                                </div>
+                            </div>
+
+                            <h3> Status: 401 -  </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                            </div>
+
+                        </article>
+                      </div>
+                      <hr>
+                    <div id="api-Notifications-notificationsIdReadPost">
+                      <article id="api-Notifications-notificationsIdReadPost-0" data-group="User" data-name="notificationsIdReadPost" data-version="0">
+                        <div class="pull-left">
+                          <h1>notificationsIdReadPost</h1>
+                          <p>Mark one notification read</p>
+                        </div>
+                        <div class="pull-right"></div>
+                        <div class="clearfix"></div>
+                        <p></p>
+                        <p class="marked">Idempotent — marking an already-read notification succeeds and bumps &#x60;readAt&#x60;.</p>
+                        <p></p>
+                        <br />
+                        <pre class="prettyprint language-html prettyprinted" data-type="post"><code><span class="pln">/notifications/{id}/read</span></code></pre>
+                        <p>
+                          <h3>Usage and SDK Samples</h3>
+                        </p>
+                        <ul class="nav nav-tabs nav-tabs-examples">
+                          <li class="active"><a href="#examples-Notifications-notificationsIdReadPost-0-curl">Curl</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-java">Java</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-android">Android</a></li>
+                          <!--<li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-groovy">Groovy</a></li>-->
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-objc">Obj-C</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-javascript">JavaScript</a></li>
+                          <!--<li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-angular">Angular</a></li>-->
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-csharp">C#</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-php">PHP</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-perl">Perl</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsIdReadPost-0-python">Python</a></li>
+                        </ul>
+
+                        <div class="tab-content">
+                          <div class="tab-pane active" id="examples-Notifications-notificationsIdReadPost-0-curl">
+                           <pre class="prettyprint"><code class="language-bsh">curl -X POST\
+ -H "Authorization: Bearer [[accessToken]]"\
+-H "Accept: application/json"\
+"/api/notifications/{id}/read"</code></pre>
+                          </div>
+                          <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-java">
+                            <pre class="prettyprint"><code class="language-java">import io.swagger.client.*;
+import io.swagger.client.auth.*;
+import io.swagger.client.model.*;
+import io.swagger.client.api.NotificationsApi;
+
+import java.io.File;
+import java.util.*;
+
+public class NotificationsApiExample {
+
+    public static void main(String[] args) {
+        ApiClient defaultClient = Configuration.getDefaultApiClient();
+
+
+        NotificationsApi apiInstance = new NotificationsApi();
+        UUID id = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // UUID | 
+        try {
+            Object result = apiInstance.notificationsIdReadPost(id);
+            System.out.println(result);
+        } catch (ApiException e) {
+            System.err.println("Exception when calling NotificationsApi#notificationsIdReadPost");
+            e.printStackTrace();
+        }
+    }
+}</code></pre>
+                          </div>
+
+                          <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-android">
+                            <pre class="prettyprint"><code class="language-java">import io.swagger.client.api.NotificationsApi;
+
+public class NotificationsApiExample {
+
+    public static void main(String[] args) {
+        NotificationsApi apiInstance = new NotificationsApi();
+        UUID id = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // UUID | 
+        try {
+            Object result = apiInstance.notificationsIdReadPost(id);
+            System.out.println(result);
+        } catch (ApiException e) {
+            System.err.println("Exception when calling NotificationsApi#notificationsIdReadPost");
+            e.printStackTrace();
+        }
+    }
+}</code></pre>
+                          </div>
+  <!--
+  <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-groovy">
+  <pre class="prettyprint language-json prettyprinted" data-type="json"><code>Coming Soon!</code></pre>
+  </div> -->
+                            <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-objc">
+                              <pre class="prettyprint"><code class="language-cpp">Configuration *apiConfig = [Configuration sharedConfig];
+UUID *id = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // 
+
+NotificationsApi *apiInstance = [[NotificationsApi alloc] init];
+
+// Mark one notification read
+[apiInstance notificationsIdReadPostWith:id
+              completionHandler: ^(Object output, NSError* error) {
+                            if (output) {
+                                NSLog(@"%@", output);
+                            }
+                            if (error) {
+                                NSLog(@"Error: %@", error);
+                            }
+                        }];
+</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-javascript">
+                              <pre class="prettyprint"><code class="language-js">var RevioApi = require('revio_api');
+var defaultClient = RevioApi.ApiClient.instance;
+
+
+var api = new RevioApi.NotificationsApi()
+var id = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // {{UUID}} 
+
+var callback = function(error, data, response) {
+  if (error) {
+    console.error(error);
+  } else {
+    console.log('API called successfully. Returned data: ' + data);
+  }
+};
+api.notificationsIdReadPost(id, callback);
+</code></pre>
+                            </div>
+
+                            <!--<div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-angular">
+              <pre class="prettyprint language-json prettyprinted" data-type="json"><code>Coming Soon!</code></pre>
+            </div>-->
+                            <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-csharp">
+                              <pre class="prettyprint"><code class="language-cs">using System;
+using System.Diagnostics;
+using IO.Swagger.Api;
+using IO.Swagger.Client;
+using IO.Swagger.Model;
+
+namespace Example
+{
+    public class notificationsIdReadPostExample
+    {
+        public void main()
+        {
+
+
+            var apiInstance = new NotificationsApi();
+            var id = new UUID(); // UUID | 
+
+            try
+            {
+                // Mark one notification read
+                Object result = apiInstance.notificationsIdReadPost(id);
+                Debug.WriteLine(result);
+            }
+            catch (Exception e)
+            {
+                Debug.Print("Exception when calling NotificationsApi.notificationsIdReadPost: " + e.Message );
+            }
+        }
+    }
+}
+</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-php">
+                              <pre class="prettyprint"><code class="language-php"><&#63;php
+require_once(__DIR__ . '/vendor/autoload.php');
+
+
+$api_instance = new Swagger\Client\ApiNotificationsApi();
+$id = 38400000-8cf0-11bd-b23e-10b96e4ef00d; // UUID | 
+
+try {
+    $result = $api_instance->notificationsIdReadPost($id);
+    print_r($result);
+} catch (Exception $e) {
+    echo 'Exception when calling NotificationsApi->notificationsIdReadPost: ', $e->getMessage(), PHP_EOL;
+}
+?></code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-perl">
+                              <pre class="prettyprint"><code class="language-perl">use Data::Dumper;
+use WWW::SwaggerClient::Configuration;
+use WWW::SwaggerClient::NotificationsApi;
+
+
+my $api_instance = WWW::SwaggerClient::NotificationsApi->new();
+my $id = 38400000-8cf0-11bd-b23e-10b96e4ef00d; # UUID | 
+
+eval { 
+    my $result = $api_instance->notificationsIdReadPost(id => $id);
+    print Dumper($result);
+};
+if ($@) {
+    warn "Exception when calling NotificationsApi->notificationsIdReadPost: $@\n";
+}</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsIdReadPost-0-python">
+                              <pre class="prettyprint"><code class="language-python">from __future__ import print_statement
+import time
+import swagger_client
+from swagger_client.rest import ApiException
+from pprint import pprint
+
+
+# create an instance of the API class
+api_instance = swagger_client.NotificationsApi()
+id = 38400000-8cf0-11bd-b23e-10b96e4ef00d # UUID | 
+
+try: 
+    # Mark one notification read
+    api_response = api_instance.notifications_id_read_post(id)
+    pprint(api_response)
+except ApiException as e:
+    print("Exception when calling NotificationsApi->notificationsIdReadPost: %s\n" % e)</code></pre>
+                            </div>
+                          </div>
+
+                          <h2>Parameters</h2>
+
+                            <div class="methodsubtabletitle">Path parameters</div>
+                            <table id="methodsubtable">
+                                <tr>
+                                  <th width="150px">Name</th>
+                                  <th>Description</th>
+                                </tr>
+                                  <tr><td style="width:150px;">id*</td>
+                                  <td>
+                                  
+                                  
+                                      <div id="d2e199_notificationsIdReadPost_id">
+                                          <div class="json-schema-view">
+                                              <div class="primitive">
+                                                  <span class="type">
+                                                      UUID
+                                                  </span>
+                                                      <span class="format">
+                                                          (uuid)
+                                                      </span>
+                                  
+                                              </div>
+                                                  <div class="inner required">
+                                                      Required
+                                                  </div>
+                                          </div>
+                                      </div>
+                                  </td>
+                                  </tr>
+                            </table>
+
+
+
+
+
+                          <h2>Responses</h2>
+                            <h3> Status: 200 - Marked read </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                                <li class="active">
+                                  <a data-toggle="tab" href="#responses-notificationsIdReadPost-200-schema">Schema</a>
+                                </li>
+
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                                <div class="tab-pane active" id="responses-notificationsIdReadPost-200-schema">
+                                  <div id='responses-notificationsIdReadPost-200-schema-200' style="padding: 30px; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
+                                    <script>
+                                      $(document).ready(function() {
+                                        var schemaWrapper = {
+  "description" : "Marked read",
+  "content" : {
+    "application/json" : {
+      "schema" : {
+        "type" : "object",
+        "properties" : {
+          "status" : {
+            "type" : "string",
+            "enum" : [ "read" ]
+          }
+        },
+        "x-content-type" : "application/json"
+      }
+    }
+  }
+};
+                                        var schema = schemaWrapper.content["application/json"].schema;
+                                        if (schema.$ref != null) {
+                                          schema = defsParser.$refs.get(schema.$ref);
+                                        } else {
+                                          schemaWrapper.components = {};
+                                          schemaWrapper.components.schemas = Object.assign({}, defs);
+                                          $RefParser.dereference(schemaWrapper).catch(function(err) {
+                                            console.log(err);
+                                          });
+                                        }
+
+                                        //console.log(JSON.stringify(schema));
+                                        var view = new JSONSchemaView(schema, 3);
+                                        $('#responses-notificationsIdReadPost-200-schema-data').val(stringify(schema));
+                                        var result = $('#responses-notificationsIdReadPost-200-schema-200');
+                                        result.empty();
+                                        result.append(view.render());
+                                      });
+                                    </script>
+                                  </div>
+                                  <input id='responses-notificationsIdReadPost-200-schema-data' type='hidden' value=''></input>
+                                </div>
+                            </div>
+
+                            <h3> Status: 400 - Invalid id </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                                <li class="active">
+                                  <a data-toggle="tab" href="#responses-notificationsIdReadPost-400-schema">Schema</a>
+                                </li>
+
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                                <div class="tab-pane active" id="responses-notificationsIdReadPost-400-schema">
+                                  <div id='responses-notificationsIdReadPost-400-schema-400' style="padding: 30px; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
+                                    <script>
+                                      $(document).ready(function() {
+                                        var schemaWrapper = {
+  "description" : "Invalid id",
+  "content" : {
+    "application/json" : {
+      "schema" : {
+        "$ref" : "#/components/schemas/ErrorResponse"
+      }
+    }
+  }
+};
+                                        var schema = schemaWrapper.content["application/json"].schema;
+                                        if (schema.$ref != null) {
+                                          schema = defsParser.$refs.get(schema.$ref);
+                                        } else {
+                                          schemaWrapper.components = {};
+                                          schemaWrapper.components.schemas = Object.assign({}, defs);
+                                          $RefParser.dereference(schemaWrapper).catch(function(err) {
+                                            console.log(err);
+                                          });
+                                        }
+
+                                        //console.log(JSON.stringify(schema));
+                                        var view = new JSONSchemaView(schema, 3);
+                                        $('#responses-notificationsIdReadPost-400-schema-data').val(stringify(schema));
+                                        var result = $('#responses-notificationsIdReadPost-400-schema-400');
+                                        result.empty();
+                                        result.append(view.render());
+                                      });
+                                    </script>
+                                  </div>
+                                  <input id='responses-notificationsIdReadPost-400-schema-data' type='hidden' value=''></input>
+                                </div>
+                            </div>
+
+                            <h3> Status: 401 -  </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                            </div>
+
+                            <h3> Status: 404 - No notification with that id belongs to the caller </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                                <li class="active">
+                                  <a data-toggle="tab" href="#responses-notificationsIdReadPost-404-schema">Schema</a>
+                                </li>
+
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                                <div class="tab-pane active" id="responses-notificationsIdReadPost-404-schema">
+                                  <div id='responses-notificationsIdReadPost-404-schema-404' style="padding: 30px; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
+                                    <script>
+                                      $(document).ready(function() {
+                                        var schemaWrapper = {
+  "description" : "No notification with that id belongs to the caller",
+  "content" : {
+    "application/json" : {
+      "schema" : {
+        "$ref" : "#/components/schemas/ErrorResponse"
+      }
+    }
+  }
+};
+                                        var schema = schemaWrapper.content["application/json"].schema;
+                                        if (schema.$ref != null) {
+                                          schema = defsParser.$refs.get(schema.$ref);
+                                        } else {
+                                          schemaWrapper.components = {};
+                                          schemaWrapper.components.schemas = Object.assign({}, defs);
+                                          $RefParser.dereference(schemaWrapper).catch(function(err) {
+                                            console.log(err);
+                                          });
+                                        }
+
+                                        //console.log(JSON.stringify(schema));
+                                        var view = new JSONSchemaView(schema, 3);
+                                        $('#responses-notificationsIdReadPost-404-schema-data').val(stringify(schema));
+                                        var result = $('#responses-notificationsIdReadPost-404-schema-404');
+                                        result.empty();
+                                        result.append(view.render());
+                                      });
+                                    </script>
+                                  </div>
+                                  <input id='responses-notificationsIdReadPost-404-schema-data' type='hidden' value=''></input>
+                                </div>
+                            </div>
+
+                        </article>
+                      </div>
+                      <hr>
+                    <div id="api-Notifications-notificationsReadAllPost">
+                      <article id="api-Notifications-notificationsReadAllPost-0" data-group="User" data-name="notificationsReadAllPost" data-version="0">
+                        <div class="pull-left">
+                          <h1>notificationsReadAllPost</h1>
+                          <p>Mark all notifications read</p>
+                        </div>
+                        <div class="pull-right"></div>
+                        <div class="clearfix"></div>
+                        <p></p>
+                        <p class="marked">Marks every unread notification for the caller read. With &#x60;category&#x60; omitted, this includes blocking notices (post removal, ban). With &#x60;category&#x60; provided, blocking notices are left untouched — a blocking notice can only be acknowledged through its dedicated dialog flow, never by a bulk category read-all.
+</p>
+                        <p></p>
+                        <br />
+                        <pre class="prettyprint language-html prettyprinted" data-type="post"><code><span class="pln">/notifications/read-all</span></code></pre>
+                        <p>
+                          <h3>Usage and SDK Samples</h3>
+                        </p>
+                        <ul class="nav nav-tabs nav-tabs-examples">
+                          <li class="active"><a href="#examples-Notifications-notificationsReadAllPost-0-curl">Curl</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-java">Java</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-android">Android</a></li>
+                          <!--<li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-groovy">Groovy</a></li>-->
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-objc">Obj-C</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-javascript">JavaScript</a></li>
+                          <!--<li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-angular">Angular</a></li>-->
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-csharp">C#</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-php">PHP</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-perl">Perl</a></li>
+                          <li class=""><a href="#examples-Notifications-notificationsReadAllPost-0-python">Python</a></li>
+                        </ul>
+
+                        <div class="tab-content">
+                          <div class="tab-pane active" id="examples-Notifications-notificationsReadAllPost-0-curl">
+                           <pre class="prettyprint"><code class="language-bsh">curl -X POST\
+ -H "Authorization: Bearer [[accessToken]]"\
+-H "Accept: application/json"\
+"/api/notifications/read-all?category="</code></pre>
+                          </div>
+                          <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-java">
+                            <pre class="prettyprint"><code class="language-java">import io.swagger.client.*;
+import io.swagger.client.auth.*;
+import io.swagger.client.model.*;
+import io.swagger.client.api.NotificationsApi;
+
+import java.io.File;
+import java.util.*;
+
+public class NotificationsApiExample {
+
+    public static void main(String[] args) {
+        ApiClient defaultClient = Configuration.getDefaultApiClient();
+
+
+        NotificationsApi apiInstance = new NotificationsApi();
+        NotificationCategory category = ; // NotificationCategory | Restricts the update to one category. Omitted updates every category.
+        try {
+            Object result = apiInstance.notificationsReadAllPost(category);
+            System.out.println(result);
+        } catch (ApiException e) {
+            System.err.println("Exception when calling NotificationsApi#notificationsReadAllPost");
+            e.printStackTrace();
+        }
+    }
+}</code></pre>
+                          </div>
+
+                          <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-android">
+                            <pre class="prettyprint"><code class="language-java">import io.swagger.client.api.NotificationsApi;
+
+public class NotificationsApiExample {
+
+    public static void main(String[] args) {
+        NotificationsApi apiInstance = new NotificationsApi();
+        NotificationCategory category = ; // NotificationCategory | Restricts the update to one category. Omitted updates every category.
+        try {
+            Object result = apiInstance.notificationsReadAllPost(category);
+            System.out.println(result);
+        } catch (ApiException e) {
+            System.err.println("Exception when calling NotificationsApi#notificationsReadAllPost");
+            e.printStackTrace();
+        }
+    }
+}</code></pre>
+                          </div>
+  <!--
+  <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-groovy">
+  <pre class="prettyprint language-json prettyprinted" data-type="json"><code>Coming Soon!</code></pre>
+  </div> -->
+                            <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-objc">
+                              <pre class="prettyprint"><code class="language-cpp">Configuration *apiConfig = [Configuration sharedConfig];
+NotificationCategory *category = ; // Restricts the update to one category. Omitted updates every category. (optional)
+
+NotificationsApi *apiInstance = [[NotificationsApi alloc] init];
+
+// Mark all notifications read
+[apiInstance notificationsReadAllPostWith:category
+              completionHandler: ^(Object output, NSError* error) {
+                            if (output) {
+                                NSLog(@"%@", output);
+                            }
+                            if (error) {
+                                NSLog(@"Error: %@", error);
+                            }
+                        }];
+</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-javascript">
+                              <pre class="prettyprint"><code class="language-js">var RevioApi = require('revio_api');
+var defaultClient = RevioApi.ApiClient.instance;
+
+
+var api = new RevioApi.NotificationsApi()
+var opts = { 
+  'category':  // {{NotificationCategory}} Restricts the update to one category. Omitted updates every category.
+};
+var callback = function(error, data, response) {
+  if (error) {
+    console.error(error);
+  } else {
+    console.log('API called successfully. Returned data: ' + data);
+  }
+};
+api.notificationsReadAllPost(opts, callback);
+</code></pre>
+                            </div>
+
+                            <!--<div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-angular">
+              <pre class="prettyprint language-json prettyprinted" data-type="json"><code>Coming Soon!</code></pre>
+            </div>-->
+                            <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-csharp">
+                              <pre class="prettyprint"><code class="language-cs">using System;
+using System.Diagnostics;
+using IO.Swagger.Api;
+using IO.Swagger.Client;
+using IO.Swagger.Model;
+
+namespace Example
+{
+    public class notificationsReadAllPostExample
+    {
+        public void main()
+        {
+
+
+            var apiInstance = new NotificationsApi();
+            var category = new NotificationCategory(); // NotificationCategory | Restricts the update to one category. Omitted updates every category. (optional) 
+
+            try
+            {
+                // Mark all notifications read
+                Object result = apiInstance.notificationsReadAllPost(category);
+                Debug.WriteLine(result);
+            }
+            catch (Exception e)
+            {
+                Debug.Print("Exception when calling NotificationsApi.notificationsReadAllPost: " + e.Message );
+            }
+        }
+    }
+}
+</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-php">
+                              <pre class="prettyprint"><code class="language-php"><&#63;php
+require_once(__DIR__ . '/vendor/autoload.php');
+
+
+$api_instance = new Swagger\Client\ApiNotificationsApi();
+$category = ; // NotificationCategory | Restricts the update to one category. Omitted updates every category.
+
+try {
+    $result = $api_instance->notificationsReadAllPost($category);
+    print_r($result);
+} catch (Exception $e) {
+    echo 'Exception when calling NotificationsApi->notificationsReadAllPost: ', $e->getMessage(), PHP_EOL;
+}
+?></code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-perl">
+                              <pre class="prettyprint"><code class="language-perl">use Data::Dumper;
+use WWW::SwaggerClient::Configuration;
+use WWW::SwaggerClient::NotificationsApi;
+
+
+my $api_instance = WWW::SwaggerClient::NotificationsApi->new();
+my $category = ; # NotificationCategory | Restricts the update to one category. Omitted updates every category.
+
+eval { 
+    my $result = $api_instance->notificationsReadAllPost(category => $category);
+    print Dumper($result);
+};
+if ($@) {
+    warn "Exception when calling NotificationsApi->notificationsReadAllPost: $@\n";
+}</code></pre>
+                            </div>
+
+                            <div class="tab-pane" id="examples-Notifications-notificationsReadAllPost-0-python">
+                              <pre class="prettyprint"><code class="language-python">from __future__ import print_statement
+import time
+import swagger_client
+from swagger_client.rest import ApiException
+from pprint import pprint
+
+
+# create an instance of the API class
+api_instance = swagger_client.NotificationsApi()
+category =  # NotificationCategory | Restricts the update to one category. Omitted updates every category. (optional)
+
+try: 
+    # Mark all notifications read
+    api_response = api_instance.notifications_read_all_post(category=category)
+    pprint(api_response)
+except ApiException as e:
+    print("Exception when calling NotificationsApi->notificationsReadAllPost: %s\n" % e)</code></pre>
+                            </div>
+                          </div>
+
+                          <h2>Parameters</h2>
+
+
+
+
+
+                            <div class="methodsubtabletitle">Query parameters</div>
+                            <table id="methodsubtable">
+                              <tr>
+                                <th width="150px">Name</th>
+                                <th>Description</th>
+                              </tr>
+                                <tr><td style="width:150px;">category</td>
+                                <td>
+                                
+                                
+                                    <div id="d2e199_notificationsReadAllPost_category">
+                                        <div class="json-schema-view">
+                                            <div class="primitive">
+                                                <span class="type">
+                                                    NotificationCategory
+                                                </span>
+                                
+                                                    <div class="inner description">
+                                                        Restricts the update to one category. Omitted updates every category.
+                                                    </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </td>
+                                </tr>
+                            </table>
+
+                          <h2>Responses</h2>
+                            <h3> Status: 200 - Number of rows updated </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                                <li class="active">
+                                  <a data-toggle="tab" href="#responses-notificationsReadAllPost-200-schema">Schema</a>
+                                </li>
+
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                                <div class="tab-pane active" id="responses-notificationsReadAllPost-200-schema">
+                                  <div id='responses-notificationsReadAllPost-200-schema-200' style="padding: 30px; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
+                                    <script>
+                                      $(document).ready(function() {
+                                        var schemaWrapper = {
+  "description" : "Number of rows updated",
+  "content" : {
+    "application/json" : {
+      "schema" : {
+        "type" : "object",
+        "properties" : {
+          "updated" : {
+            "type" : "integer"
+          }
+        },
+        "x-content-type" : "application/json"
+      }
+    }
+  }
+};
+                                        var schema = schemaWrapper.content["application/json"].schema;
+                                        if (schema.$ref != null) {
+                                          schema = defsParser.$refs.get(schema.$ref);
+                                        } else {
+                                          schemaWrapper.components = {};
+                                          schemaWrapper.components.schemas = Object.assign({}, defs);
+                                          $RefParser.dereference(schemaWrapper).catch(function(err) {
+                                            console.log(err);
+                                          });
+                                        }
+
+                                        //console.log(JSON.stringify(schema));
+                                        var view = new JSONSchemaView(schema, 3);
+                                        $('#responses-notificationsReadAllPost-200-schema-data').val(stringify(schema));
+                                        var result = $('#responses-notificationsReadAllPost-200-schema-200');
+                                        result.empty();
+                                        result.append(view.render());
+                                      });
+                                    </script>
+                                  </div>
+                                  <input id='responses-notificationsReadAllPost-200-schema-data' type='hidden' value=''></input>
+                                </div>
+                            </div>
+
+                            <h3> Status: 400 - Unrecognized category </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                                <li class="active">
+                                  <a data-toggle="tab" href="#responses-notificationsReadAllPost-400-schema">Schema</a>
+                                </li>
+
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
+                                <div class="tab-pane active" id="responses-notificationsReadAllPost-400-schema">
+                                  <div id='responses-notificationsReadAllPost-400-schema-400' style="padding: 30px; border-left: 1px solid #eee; border-right: 1px solid #eee; border-bottom: 1px solid #eee;">
+                                    <script>
+                                      $(document).ready(function() {
+                                        var schemaWrapper = {
+  "description" : "Unrecognized category",
+  "content" : {
+    "application/json" : {
+      "schema" : {
+        "$ref" : "#/components/schemas/ErrorResponse"
+      }
+    }
+  }
+};
+                                        var schema = schemaWrapper.content["application/json"].schema;
+                                        if (schema.$ref != null) {
+                                          schema = defsParser.$refs.get(schema.$ref);
+                                        } else {
+                                          schemaWrapper.components = {};
+                                          schemaWrapper.components.schemas = Object.assign({}, defs);
+                                          $RefParser.dereference(schemaWrapper).catch(function(err) {
+                                            console.log(err);
+                                          });
+                                        }
+
+                                        //console.log(JSON.stringify(schema));
+                                        var view = new JSONSchemaView(schema, 3);
+                                        $('#responses-notificationsReadAllPost-400-schema-data').val(stringify(schema));
+                                        var result = $('#responses-notificationsReadAllPost-400-schema-400');
+                                        result.empty();
+                                        result.append(view.render());
+                                      });
+                                    </script>
+                                  </div>
+                                  <input id='responses-notificationsReadAllPost-400-schema-data' type='hidden' value=''></input>
+                                </div>
+                            </div>
+
+                            <h3> Status: 401 -  </h3>
+
+                            <ul class="nav nav-tabs nav-tabs-examples" >
+                            </ul>
+
+                            <div class="tab-content" style='margin-bottom: 10px;'>
                             </div>
 
                         </article>

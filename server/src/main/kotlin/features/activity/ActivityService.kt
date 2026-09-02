@@ -11,10 +11,24 @@ import features.activity.ActivityEventRow
 import features.activity.CommentActivityRow
 import features.activity.IActivityDAO
 import features.activity.LikeActivityRow
+import features.comment.CommentService
+import features.like.LikeService
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.temporal.TemporalAdjusters
 import java.util.UUID
+
+/**
+ * How many raw rows [ActivityService.getActivity] asks [IActivityDAO] for per LIKE/COMMENT
+ * source before aggregating, relative to the response `limit` — aggregation can collapse many
+ * raw rows into one card, so fetching only `limit` raw rows can under-fill a page even though
+ * older, un-aggregated rows exist that would fill it. Capped by [ACTIVITY_RAW_FETCH_CAP] so a
+ * very small `limit` doesn't turn into an unbounded fetch (plan Partea II, Pasul 4).
+ */
+private const val ACTIVITY_OVERFETCH_FACTOR = 4
+
+/** Upper bound on raw rows fetched per LIKE/COMMENT source, regardless of [ACTIVITY_OVERFETCH_FACTOR] * `limit`. */
+private const val ACTIVITY_RAW_FETCH_CAP = 400
 
 interface IActivityService {
     /**
@@ -52,8 +66,9 @@ class ActivityService(
 
         val todayInteractions = activityDao.countTodayUniqueInteractors(userId, dayStart).toInt()
 
-        val likeItems = activityDao.getLikeItems(userId, limit).map { it.toDTO() }
-        val commentItems = activityDao.getCommentItems(userId, limit).map { it.toDTO() }
+        val rawFetchLimit = (limit * ACTIVITY_OVERFETCH_FACTOR).coerceAtMost(ACTIVITY_RAW_FETCH_CAP)
+        val likeItems = activityDao.getLikeItems(userId, rawFetchLimit).aggregateLikes()
+        val commentItems = activityDao.getCommentItems(userId, rawFetchLimit).aggregateComments()
         val persistedItems = activityDao.getPersistedEvents(userId, limit).map { it.toDTO() }
 
         val items = (likeItems + commentItems + persistedItems)
@@ -67,32 +82,61 @@ class ActivityService(
         )
     }
 
-    private fun LikeActivityRow.toDTO(): ActivityItemDTO = ActivityItemDTO(
-        type = "LIKE",
-        id = "like:$likeId",
-        actorUserId = actorUserId,
-        actorUsername = actorUsername,
-        actorAvatarUrl = actorProfilePicturePath?.let(storageService::resolveUrl),
-        postId = postId,
-        postThumbnailUrl = storageService.resolveUrl(postImageKey),
-        brand = brand,
-        model = model,
-        createdAt = createdAt,
-    )
+    /**
+     * Groups likes by `(postId, aggregation window)` — the same 60-minute calendar-floor bucket
+     * [LikeService] uses to aggregate `user_notifications` rows — so a card in Activity always
+     * represents the same set of actors as the matching notification (plan Partea II, Pasul 3).
+     * The most recent row in each group becomes the card's actor/avatar/timestamp; [ActivityItemDTO.actorCount]
+     * carries the distinct-actor count for the card's copy on Android.
+     */
+    private fun List<LikeActivityRow>.aggregateLikes(): List<ActivityItemDTO> =
+        groupBy { row -> row.postId to LikeService.windowStartFor(row.createdAt) }
+            .map { (window, rows) ->
+                val (postId, windowStart) = window
+                val latest = rows.maxBy { it.createdAt }
+                val actorCount = rows.map { it.actorUserId }.distinct().size
+                ActivityItemDTO(
+                    type = "LIKE",
+                    id = "like:$postId:${windowStart.epochSecond}",
+                    actorUserId = latest.actorUserId,
+                    actorUsername = latest.actorUsername,
+                    actorAvatarUrl = latest.actorProfilePicturePath?.let(storageService::resolveUrl),
+                    postId = latest.postId,
+                    postThumbnailUrl = storageService.resolveUrl(latest.postImageKey),
+                    brand = latest.brand,
+                    model = latest.model,
+                    createdAt = latest.createdAt,
+                    actorCount = actorCount,
+                )
+            }
 
-    private fun CommentActivityRow.toDTO(): ActivityItemDTO = ActivityItemDTO(
-        type = "COMMENT",
-        id = "comment:$commentId",
-        actorUserId = actorUserId,
-        actorUsername = actorUsername,
-        actorAvatarUrl = actorProfilePicturePath?.let(storageService::resolveUrl),
-        postId = postId,
-        postThumbnailUrl = storageService.resolveUrl(postImageKey),
-        brand = brand,
-        model = model,
-        commentText = commentText,
-        createdAt = createdAt,
-    )
+    /**
+     * Same grouping as [aggregateLikes], but on [CommentService]'s 15-minute window. `commentText`
+     * is kept only for a single-actor group — an aggregated group has no one comment to show, same
+     * as [com.revio.server.features.notification.NotificationEventService] deliberately excluding
+     * comment text from aggregated notification copy.
+     */
+    private fun List<CommentActivityRow>.aggregateComments(): List<ActivityItemDTO> =
+        groupBy { row -> row.postId to CommentService.windowStartFor(row.createdAt) }
+            .map { (window, rows) ->
+                val (postId, windowStart) = window
+                val latest = rows.maxBy { it.createdAt }
+                val actorCount = rows.map { it.actorUserId }.distinct().size
+                ActivityItemDTO(
+                    type = "COMMENT",
+                    id = "comment:$postId:${windowStart.epochSecond}",
+                    actorUserId = latest.actorUserId,
+                    actorUsername = latest.actorUsername,
+                    actorAvatarUrl = latest.actorProfilePicturePath?.let(storageService::resolveUrl),
+                    postId = latest.postId,
+                    postThumbnailUrl = storageService.resolveUrl(latest.postImageKey),
+                    brand = latest.brand,
+                    model = latest.model,
+                    commentText = if (actorCount == 1) latest.commentText else null,
+                    createdAt = latest.createdAt,
+                    actorCount = actorCount,
+                )
+            }
 
     private fun ActivityEventRow.toDTO(): ActivityItemDTO = when (type) {
         ActivityEventType.STREAK -> ActivityItemDTO(

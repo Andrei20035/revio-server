@@ -161,6 +161,7 @@ class PushDispatchService(
 
         return classifyResponse(
             json = json,
+            project = project,
             isSuccess = response.status.isSuccess(),
             statusCode = response.status.value,
             retryAfterHeader = response.headers[HttpHeaders.RetryAfter],
@@ -176,6 +177,7 @@ class PushDispatchService(
  */
 internal fun classifyResponse(
     json: Json,
+    project: FirebaseProject,
     isSuccess: Boolean,
     statusCode: Int,
     retryAfterHeader: String?,
@@ -206,6 +208,13 @@ internal fun classifyResponse(
             }
             statusCode == 404 -> FcmSendResult.Terminal(FcmTerminalReason.UNREGISTERED)
             statusCode == 400 -> FcmSendResult.Terminal(FcmTerminalReason.INVALID_ARGUMENT)
+            // 401/403 (step 4.5): the service account itself is bad (expired/revoked/lacking
+            // permission) — an FCM-side problem for this specific message, not a config one, but
+            // retrying a *different* message won't help either as long as the credential stays
+            // bad. Classified as Unconfigured rather than Unknown/Retriable so the processor
+            // leaves the row PENDING and rate-limited-warns instead of burning its 5-attempt
+            // retry budget on something a retry can never fix.
+            statusCode == 401 || statusCode == 403 -> FcmSendResult.Unconfigured(project)
             else -> FcmSendResult.Unknown(statusCode, responseText)
         }
     }

@@ -32,6 +32,13 @@ data class ActivityItemDTO(
     val streakDays: Int? = null,
     @Serializable(with = InstantSerializer::class)
     val createdAt: Instant,
+    /**
+     * Number of distinct actors folded into this LIKE/COMMENT item by [com.revio.server.features.activity.ActivityService]'s
+     * per-post, per-aggregation-window grouping (same windows as the notification pipeline).
+     * `1` for an un-aggregated item, and for every non-LIKE/COMMENT type. Additive field —
+     * defaults to `1` so it doesn't change shape for older readers that ignore it.
+     */
+    val actorCount: Int = 1,
 )
 
 @Serializable

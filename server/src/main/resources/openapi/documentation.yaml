@@ -47,6 +47,12 @@ tags:
     description: Spot-score leaderboard
   - name: Activity
     description: Activity feed for the current user
+  - name: Notifications
+    description: >
+      Pull-based in-app notifications: moderation notices (ACCOUNT — post removed, account
+      suspended/reactivated, violation revoked) and social/broadcast notices (LIKES, COMMENTS,
+      DISCOVERY, REMINDERS). Independent of push delivery, which is driven by the same rows but
+      never exposed through these endpoints.
   - name: Feedback
     description: In-app feedback (bug reports, confusion, feature ideas, general feedback)
   - name: Admin
@@ -1613,6 +1619,134 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ActivityResponseDTO'
+        '401':
+          $ref: '#/components/responses/AuthUnauthorized'
+
+  # ------------------------------------------------------------- Notifications
+  /notifications:
+    get:
+      summary: Get notifications
+      description: >
+        Keyset-paginated notifications for the calling user, newest first, plus the unread count.
+        `cursorCreatedAt` and `cursorNotificationId` must both be provided together (subsequent
+        page) or both omitted (first page).
+      tags: [Notifications]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          description: Coerced into 1..200
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+        - name: cursorCreatedAt
+          in: query
+          description: Opaque cursor field from a previous response's `nextCursor.lastCreatedAt`
+          schema:
+            type: string
+            format: date-time
+        - name: cursorNotificationId
+          in: query
+          description: Opaque cursor field from a previous response's `nextCursor.lastNotificationId`
+          schema:
+            type: string
+            format: uuid
+        - name: category
+          in: query
+          description: >
+            Restricts the page and `unreadCount` to one category. Omitted returns every
+            category (default, unfiltered).
+          schema:
+            $ref: '#/components/schemas/NotificationCategory'
+      responses:
+        '200':
+          description: Notifications page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationListResponseDTO'
+        '400':
+          description: Partial cursor pair, malformed cursor value, or unrecognized category
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthUnauthorized'
+
+  /notifications/{id}/read:
+    post:
+      summary: Mark one notification read
+      description: Idempotent — marking an already-read notification succeeds and bumps `readAt`.
+      tags: [Notifications]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Marked read
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [read]
+        '400':
+          description: Invalid id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/AuthUnauthorized'
+        '404':
+          description: No notification with that id belongs to the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /notifications/read-all:
+    post:
+      summary: Mark all notifications read
+      description: >
+        Marks every unread notification for the caller read. With `category` omitted, this
+        includes blocking notices (post removal, ban). With `category` provided, blocking
+        notices are left untouched — a blocking notice can only be acknowledged through its
+        dedicated dialog flow, never by a bulk category read-all.
+      tags: [Notifications]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: category
+          in: query
+          description: Restricts the update to one category. Omitted updates every category.
+          schema:
+            $ref: '#/components/schemas/NotificationCategory'
+      responses:
+        '200':
+          description: Number of rows updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated:
+                    type: integer
+        '400':
+          description: Unrecognized category
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '401':
           $ref: '#/components/responses/AuthUnauthorized'
 
@@ -3249,6 +3383,93 @@ components:
           items:
             $ref: '#/components/schemas/ActivityItemDTO'
       required: [weeklySpotScore, todayInteractions, items]
+
+    # -------------------------------------------------------- notifications
+    NotificationCategory:
+      type: string
+      description: >
+        ACCOUNT covers moderation notices (post removal, ban, violation revocation); the rest
+        are the social/broadcast categories.
+      enum: [ACCOUNT, LIKES, COMMENTS, DISCOVERY, REMINDERS]
+
+    NotificationType:
+      type: string
+      enum:
+        - POST_REMOVED
+        - ACCOUNT_SUSPENDED
+        - ACCOUNT_UNSUSPENDED
+        - VIOLATION_REVOKED
+        - CHALLENGE_REWARD_REVOKED
+        - SOCIAL
+
+    NotificationDTO:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/NotificationType'
+        title:
+          type: string
+        body:
+          type: string
+        blocking:
+          type: boolean
+          description: >
+            When true, the client must present this notice as a dialog the user cannot dismiss
+            without acknowledging.
+        createdAt:
+          type: string
+          format: date-time
+        readAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+        category:
+          $ref: '#/components/schemas/NotificationCategory'
+        postId:
+          type: string
+          format: uuid
+          nullable: true
+        commentId:
+          type: string
+          format: uuid
+          nullable: true
+        deepLink:
+          type: string
+          nullable: true
+      required: [id, type, title, body, blocking, createdAt, updatedAt, category]
+
+    NotificationCursorDTO:
+      type: object
+      properties:
+        lastCreatedAt:
+          type: string
+          format: date-time
+        lastNotificationId:
+          type: string
+          format: uuid
+      required: [lastCreatedAt, lastNotificationId]
+
+    NotificationListResponseDTO:
+      type: object
+      properties:
+        unreadCount:
+          type: integer
+          format: int64
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationDTO'
+        nextCursor:
+          $ref: '#/components/schemas/NotificationCursorDTO'
+        hasMore:
+          type: boolean
+      required: [unreadCount, items]
 
     # ------------------------------------------------------------- feedback
     FeedbackCategory:

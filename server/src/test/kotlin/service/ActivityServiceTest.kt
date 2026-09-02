@@ -12,6 +12,7 @@ import features.activity.IActivityDAO
 import features.activity.LikeActivityRow
 import com.revio.server.features.leaderboard.UserScoreStreak
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -297,5 +298,243 @@ class ActivityServiceTest {
         // Newest two (i=1, i=2) survive the truncation.
         assertEquals("user1", result.items[0].actorUsername)
         assertEquals("user2", result.items[1].actorUsername)
+    }
+
+    // ---------- LIKE / COMMENT aggregation (Partea II, Pasul 3) ----------
+
+    private fun likeRow(
+        postId: UUID,
+        createdAt: Instant,
+        actorUserId: UUID = UUID.randomUUID(),
+        actorUsername: String = "user-$actorUserId",
+    ) = LikeActivityRow(
+        likeId = UUID.randomUUID(),
+        actorUserId = actorUserId,
+        actorUsername = actorUsername,
+        actorProfilePicturePath = null,
+        postId = postId,
+        postImageKey = "posts/$postId.jpg",
+        brand = "Porsche",
+        model = "911",
+        createdAt = createdAt,
+    )
+
+    private fun commentRow(
+        postId: UUID,
+        createdAt: Instant,
+        actorUserId: UUID = UUID.randomUUID(),
+        actorUsername: String = "user-$actorUserId",
+        commentText: String = "nice spot",
+    ) = CommentActivityRow(
+        commentId = UUID.randomUUID(),
+        actorUserId = actorUserId,
+        actorUsername = actorUsername,
+        actorProfilePicturePath = null,
+        postId = postId,
+        postImageKey = "posts/$postId.jpg",
+        brand = "BMW",
+        model = "M4",
+        commentText = commentText,
+        createdAt = createdAt,
+    )
+
+    @Test
+    fun `three likes on the same post within the 60-minute window collapse into one card`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        val postId = UUID.randomUUID()
+        val windowBase = Instant.parse("2026-08-25T10:00:00Z") // aligned to a 60-min bucket
+        val actor1 = UUID.randomUUID()
+        val actor2 = UUID.randomUUID()
+        val actor3 = UUID.randomUUID()
+        coEvery { activityDao.getLikeItems(userId, any()) } returns listOf(
+            likeRow(postId, windowBase.plusSeconds(60), actor1, "alice"),
+            likeRow(postId, windowBase.plusSeconds(600), actor2, "bob"),
+            likeRow(postId, windowBase.plusSeconds(1800), actor3, "carol"), // most recent -> representative
+        )
+
+        val result = service.getActivity(userId, 50, "UTC")
+
+        val item = result.items.single()
+        assertEquals("LIKE", item.type)
+        assertEquals(3, item.actorCount)
+        assertEquals(actor3, item.actorUserId)
+        assertEquals("carol", item.actorUsername)
+        assertEquals(windowBase.plusSeconds(1800), item.createdAt)
+    }
+
+    @Test
+    fun `likes on different posts are never aggregated together`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        val now = Instant.parse("2026-08-25T10:00:00Z")
+        coEvery { activityDao.getLikeItems(userId, any()) } returns listOf(
+            likeRow(UUID.randomUUID(), now),
+            likeRow(UUID.randomUUID(), now.plusSeconds(60)),
+        )
+
+        val result = service.getActivity(userId, 50, "UTC")
+
+        assertEquals(2, result.items.size)
+        assertTrue(result.items.all { it.actorCount == 1 })
+    }
+
+    @Test
+    fun `likes 08_59 and 09_01 on the same post fall in different calendar buckets and stay separate`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        val postId = UUID.randomUUID()
+        coEvery { activityDao.getLikeItems(userId, any()) } returns listOf(
+            likeRow(postId, Instant.parse("2026-08-25T08:59:00Z")),
+            likeRow(postId, Instant.parse("2026-08-25T09:01:00Z")),
+        )
+
+        val result = service.getActivity(userId, 50, "UTC")
+
+        assertEquals(2, result.items.size)
+        assertTrue(result.items.all { it.actorCount == 1 })
+    }
+
+    @Test
+    fun `a single comment keeps its commentText and actorCount 1`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        coEvery { activityDao.getCommentItems(userId, any()) } returns listOf(
+            commentRow(UUID.randomUUID(), Instant.now(), commentText = "Incredible spec"),
+        )
+
+        val result = service.getActivity(userId, 50, "UTC")
+
+        val item = result.items.single()
+        assertEquals(1, item.actorCount)
+        assertEquals("Incredible spec", item.commentText)
+    }
+
+    @Test
+    fun `comments from two different users within the 15-minute window aggregate to one actor each and drop commentText`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        val postId = UUID.randomUUID()
+        val windowBase = Instant.parse("2026-08-25T10:00:00Z")
+        coEvery { activityDao.getCommentItems(userId, any()) } returns listOf(
+            commentRow(postId, windowBase.plusSeconds(60), commentText = "first"),
+            commentRow(postId, windowBase.plusSeconds(120), commentText = "second"),
+        )
+
+        val result = service.getActivity(userId, 50, "UTC")
+
+        val item = result.items.single()
+        assertEquals("COMMENT", item.type)
+        assertEquals(2, item.actorCount)
+        assertEquals(null, item.commentText)
+    }
+
+    @Test
+    fun `three comments from the same user in the same window count as a single actor`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        val postId = UUID.randomUUID()
+        val actor = UUID.randomUUID()
+        val windowBase = Instant.parse("2026-08-25T10:00:00Z")
+        coEvery { activityDao.getCommentItems(userId, any()) } returns listOf(
+            commentRow(postId, windowBase.plusSeconds(60), actor, "dave", "one"),
+            commentRow(postId, windowBase.plusSeconds(120), actor, "dave", "two"),
+            commentRow(postId, windowBase.plusSeconds(180), actor, "dave", "three"),
+        )
+
+        val result = service.getActivity(userId, 50, "UTC")
+
+        val item = result.items.single()
+        assertEquals(1, item.actorCount)
+        assertEquals("three", item.commentText)
+    }
+
+    @Test
+    fun `zero items in one category does not affect aggregation of the other`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        val postId = UUID.randomUUID()
+        val windowBase = Instant.parse("2026-08-25T10:00:00Z")
+        coEvery { activityDao.getLikeItems(userId, any()) } returns listOf(
+            likeRow(postId, windowBase),
+            likeRow(postId, windowBase.plusSeconds(60)),
+        )
+        // getCommentItems stays empty via stubEmptySources()
+
+        val result = service.getActivity(userId, 50, "UTC")
+
+        val item = result.items.single()
+        assertEquals("LIKE", item.type)
+        assertEquals(2, item.actorCount)
+    }
+
+    // ---------- over-fetch (Partea II, Pasul 4) ----------
+
+    @Test
+    fun `raw fetch requests limit times 4 rows from like and comment sources, but only limit from persisted events`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        service.getActivity(userId, 50, "UTC")
+
+        coVerify(exactly = 1) { activityDao.getLikeItems(userId, 200) }
+        coVerify(exactly = 1) { activityDao.getCommentItems(userId, 200) }
+        coVerify(exactly = 1) { activityDao.getPersistedEvents(userId, 50) }
+    }
+
+    @Test
+    fun `raw fetch is capped at 400 rows even when limit times 4 would exceed it`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        service.getActivity(userId, 200, "UTC") // 200 * 4 = 800, must be capped to 400
+
+        coVerify(exactly = 1) { activityDao.getLikeItems(userId, 400) }
+        coVerify(exactly = 1) { activityDao.getCommentItems(userId, 400) }
+    }
+
+    @Test
+    fun `over-fetch fills the page with an older group that a limit-sized raw fetch would have missed`() = runTest {
+        stubEmptySources()
+        coEvery { leaderboardDao.getUserScoreAndStreak(userId) } returns userScoreStreak(score = 0)
+        coEvery { snapshotDao.getSpotScoreOnOrBefore(userId, any()) } returns 0
+
+        // 5 likes on the newest post, all in the same window -> collapse to 1 card.
+        val newestPost = UUID.randomUUID()
+        val newestWindow = Instant.parse("2026-08-25T12:00:00Z")
+        val recentLikes = (0 until 5).map { i -> likeRow(newestPost, newestWindow.plusSeconds(i.toLong())) }
+        // 3 more likes on an older post, in an earlier (separate) window -> a 2nd card, but only
+        // reachable if the raw fetch pulls past the first 5 rows (a plain `limit=2` raw fetch
+        // would only ever see rows from the newest post and never learn this group exists).
+        val olderPost = UUID.randomUUID()
+        val olderWindow = Instant.parse("2026-08-25T09:00:00Z")
+        val olderLikes = (0 until 3).map { i -> likeRow(olderPost, olderWindow.plusSeconds(i.toLong())) }
+
+        coEvery { activityDao.getLikeItems(userId, any()) } returns (recentLikes + olderLikes)
+
+        val result = service.getActivity(userId, 2, "UTC")
+
+        assertEquals(2, result.items.size)
+        assertEquals(setOf(newestPost, olderPost), result.items.map { it.postId }.toSet())
+        val newestCard = result.items.single { it.postId == newestPost }
+        val olderCard = result.items.single { it.postId == olderPost }
+        assertEquals(5, newestCard.actorCount)
+        assertEquals(3, olderCard.actorCount)
     }
 }

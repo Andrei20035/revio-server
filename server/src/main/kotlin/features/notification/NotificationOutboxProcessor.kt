@@ -7,11 +7,19 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
+import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
+
+private val logger = LoggerFactory.getLogger("com.revio.server.features.notification.NotificationOutboxProcessor")
+
+/** How often [logger] re-warns about the same unconfigured Firebase project, so a stuck config issue doesn't spam every 25s dispatcher tick. */
+private const val UNCONFIGURED_WARN_INTERVAL_MS = 5 * 60 * 1000L
 
 /**
  * Backoff schedule for retriable FCM failures (5xx/429), in seconds — 30s, 2m, 8m, 30m, 2h, one
@@ -179,6 +187,9 @@ class NotificationOutboxProcessor(
         val device: UserDevice,
     )
 
+    /** Last time (epoch ms) [logger] warned about each project's unconfigured FCM credential — see [UNCONFIGURED_WARN_INTERVAL_MS]. */
+    private val lastUnconfiguredWarnAtMs = ConcurrentHashMap<FirebaseProject, AtomicLong>()
+
     override suspend fun processDueBatch(limit: Int) {
         val now = OffsetDateTime.now(ZoneOffset.UTC)
 
@@ -302,7 +313,19 @@ class NotificationOutboxProcessor(
             }
             is FcmSendResult.Retriable -> entries.forEach { applyRetryOrDeadLetter(it, "HTTP_${result.httpStatus}", result.retryAfterSeconds) }
             is FcmSendResult.Unknown -> entries.forEach { applyRetryOrDeadLetter(it, "HTTP_${result.httpStatus}", retryAfterSeconds = null) }
-            is FcmSendResult.Unconfigured -> Unit
+            is FcmSendResult.Unconfigured -> {
+                NotificationMetrics.outboxUnconfigured(result.project.name)
+                val lastWarnAt = lastUnconfiguredWarnAtMs.getOrPut(result.project) { AtomicLong(0) }
+                val now = System.currentTimeMillis()
+                if (now - lastWarnAt.get() >= UNCONFIGURED_WARN_INTERVAL_MS) {
+                    lastWarnAt.set(now)
+                    logger.warn(
+                        "Skipping {} outbox row(s) for project={}: no usable FCM credential configured",
+                        entries.size,
+                        result.project,
+                    )
+                }
+            }
         }
     }
 

@@ -5,7 +5,9 @@ import com.revio.server.features.auth.RefreshTokenGenerator
 import com.revio.server.features.auth.session.AuthSessionDAO
 import com.revio.server.features.auth.session.SessionScope
 import com.revio.server.features.auth.session.SessionService
+import com.revio.server.features.notification.NotificationCategory
 import com.revio.server.features.notification.NotificationDAO
+import com.revio.server.features.notification.NotificationTable
 import com.revio.server.features.notification.NotificationType
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.*
@@ -20,8 +22,13 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.boolean
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.selectAll
+import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -72,6 +79,22 @@ class NotificationRoutesTest {
             }
             block(client)
         }
+
+    /** Inserts a notification then stamps its category — [NotificationDAO.insert] always defaults to ACCOUNT. */
+    private suspend fun seedNotification(
+        userId: UUID,
+        body: String,
+        category: NotificationCategory,
+        blocking: Boolean = false,
+    ): UUID {
+        val id = notificationDao.insert(userId, NotificationType.POST_REMOVED, "t", body, blocking)
+        transaction {
+            NotificationTable.update({ NotificationTable.id eq id }) {
+                it[NotificationTable.category] = category
+            }
+        }
+        return id
+    }
 
     private suspend fun tokenFor(authId: UUID, userId: UUID?, email: String = "user@example.com"): String {
         val (session) = SessionService(AuthSessionDAO(), RefreshTokenGenerator()).createSession(
@@ -310,6 +333,100 @@ class NotificationRoutesTest {
             parameter("cursorCreatedAt", "not-a-timestamp")
             parameter("cursorNotificationId", "not-a-uuid")
         }
+
+        assertEquals(HttpStatusCode.BadRequest, resp.status)
+    }
+
+    @Test
+    fun `GET notifications with category ACCOUNT returns only ACCOUNT items and unreadCount`() = notificationTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        runBlocking {
+            seedNotification(alice.userId, "account-notice", NotificationCategory.ACCOUNT)
+            seedNotification(alice.userId, "a-like", NotificationCategory.LIKES)
+            seedNotification(alice.userId, "a-comment", NotificationCategory.COMMENTS)
+        }
+        val token = tokenFor(alice.authId, alice.userId, alice.email)
+
+        val resp = client.get("/api/notifications?category=ACCOUNT") { bearerAuth(token) }
+
+        assertEquals(HttpStatusCode.OK, resp.status)
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        val items = body["items"]!!.jsonArray
+        assertEquals(1, items.size)
+        assertEquals("account-notice", items[0].jsonObject["body"]?.jsonPrimitive?.content)
+        assertEquals(1L, body["unreadCount"]?.jsonPrimitive?.long)
+    }
+
+    @Test
+    fun `GET notifications cursor pagination stays within the requested category`() = notificationTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val accountBodies = (1..3).map { "account-$it" }
+        runBlocking {
+            repeat(60) { seedNotification(alice.userId, "social-$it", NotificationCategory.LIKES) }
+            accountBodies.forEach { body -> seedNotification(alice.userId, body, NotificationCategory.ACCOUNT) }
+        }
+        val token = tokenFor(alice.authId, alice.userId, alice.email)
+
+        val resp = client.get("/api/notifications?category=ACCOUNT") { bearerAuth(token) }
+
+        assertEquals(HttpStatusCode.OK, resp.status)
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        val items = body["items"]!!.jsonArray.map { it.jsonObject["body"]!!.jsonPrimitive.content }
+        assertEquals(accountBodies.toSet(), items.toSet())
+        assertEquals(false, body["hasMore"]?.jsonPrimitive?.boolean ?: false)
+    }
+
+    @Test
+    fun `GET notifications with an invalid category returns 400`() = notificationTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val token = tokenFor(alice.authId, alice.userId, alice.email)
+
+        val resp = client.get("/api/notifications?category=NOPE") { bearerAuth(token) }
+
+        assertEquals(HttpStatusCode.BadRequest, resp.status)
+    }
+
+    @Test
+    fun `POST notifications read-all with category ACCOUNT does not mark social notifications read`() = notificationTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val likeId = runBlocking {
+            seedNotification(alice.userId, "account-notice", NotificationCategory.ACCOUNT)
+            seedNotification(alice.userId, "a-like", NotificationCategory.LIKES)
+        }
+        val token = tokenFor(alice.authId, alice.userId, alice.email)
+
+        val resp = client.post("/api/notifications/read-all?category=ACCOUNT") { bearerAuth(token) }
+
+        assertEquals(HttpStatusCode.OK, resp.status)
+        val likeStillUnread = transaction {
+            NotificationTable.selectAll().where { NotificationTable.id eq likeId }.single()[NotificationTable.readAt] == null
+        }
+        assertTrue(likeStillUnread)
+    }
+
+    @Test
+    fun `POST notifications read-all with category ACCOUNT does not mark a blocking notice read`() = notificationTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val blockingId = runBlocking {
+            seedNotification(alice.userId, "account-suspended", NotificationCategory.ACCOUNT, blocking = true)
+        }
+        val token = tokenFor(alice.authId, alice.userId, alice.email)
+
+        val resp = client.post("/api/notifications/read-all?category=ACCOUNT") { bearerAuth(token) }
+
+        assertEquals(HttpStatusCode.OK, resp.status)
+        val blockingStillUnread = transaction {
+            NotificationTable.selectAll().where { NotificationTable.id eq blockingId }.single()[NotificationTable.readAt] == null
+        }
+        assertTrue(blockingStillUnread)
+    }
+
+    @Test
+    fun `POST notifications read-all with an invalid category returns 400`() = notificationTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val token = tokenFor(alice.authId, alice.userId, alice.email)
+
+        val resp = client.post("/api/notifications/read-all?category=NOPE") { bearerAuth(token) }
 
         assertEquals(HttpStatusCode.BadRequest, resp.status)
     }

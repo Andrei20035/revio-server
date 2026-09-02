@@ -3,6 +3,8 @@ package com.revio.server.features.notification
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.lessEq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insertIgnore
@@ -76,6 +78,17 @@ interface INotificationOutboxDAO {
 
     /** `outbox.queue_depth` (§16, pas 7.3) — how many rows are still PENDING or FAILED, regardless of whether they're due yet. */
     suspend fun countQueued(): Long
+
+    /**
+     * Counts distinct notification events accepted by FCM for [userId] since [since], limited
+     * to [categories]. A notification fanned out to multiple devices counts once, because policy
+     * caps are per user/event rather than per device delivery.
+     */
+    suspend fun countAcceptedNotificationsSince(
+        userId: UUID,
+        categories: Set<NotificationCategory>,
+        since: OffsetDateTime,
+    ): Int = throw UnsupportedOperationException("Accepted-notification policy counts are not implemented")
 }
 
 class NotificationOutboxDAO : INotificationOutboxDAO {
@@ -179,6 +192,27 @@ class NotificationOutboxDAO : INotificationOutboxDAO {
                     (NotificationOutboxTable.state eq OutboxState.FAILED)
             }
             .count()
+    }
+
+    override suspend fun countAcceptedNotificationsSince(
+        userId: UUID,
+        categories: Set<NotificationCategory>,
+        since: OffsetDateTime,
+    ): Int = transaction {
+        if (categories.isEmpty()) return@transaction 0
+
+        NotificationOutboxTable
+            .innerJoin(NotificationTable)
+            .select(NotificationOutboxTable.notificationId)
+            .where {
+                (NotificationOutboxTable.state eq OutboxState.ACCEPTED) and
+                    (NotificationOutboxTable.updatedAt greaterEq since) and
+                    (NotificationTable.userId eq userId) and
+                    (NotificationTable.category inList categories)
+            }
+            .withDistinct()
+            .count()
+            .toInt()
     }
 
     private fun ResultRow.toEntry() = NotificationOutboxEntry(

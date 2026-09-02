@@ -5,12 +5,19 @@ import com.revio.server.features.comment.dto.CommentDTO
 import com.revio.server.features.comment.dto.toDTO
 import com.revio.server.features.notification.INotificationEventService
 import com.revio.server.features.notification.INotificationOutboxDAO
+import com.revio.server.features.notification.INotificationPolicyService
 import com.revio.server.features.notification.IUserDeviceDAO
 import com.revio.server.features.notification.IUserNotificationPrefsDAO
+import com.revio.server.features.notification.NotificationCategory
+import com.revio.server.features.notification.NotificationPolicyInput
+import com.revio.server.features.notification.NotificationPolicyService
+import com.revio.server.features.notification.NotificationVerdict
 import com.revio.server.features.post.IPostDAO
 import com.revio.server.features.scoring.IScoringService
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
 import java.util.UUID
 
 class PostNotFoundException(postId: UUID) : RuntimeException("Post $postId does not exist")
@@ -34,6 +41,7 @@ class CommentService(
     private val userDeviceDao: IUserDeviceDAO,
     private val notificationOutboxDao: INotificationOutboxDAO,
     private val commentsPushEnabledProvider: () -> String? = { System.getenv("ENABLE_COMMENTS_PUSH") },
+    private val notificationPolicyService: INotificationPolicyService = NotificationPolicyService(),
 ) : ICommentService {
 
     companion object {
@@ -155,20 +163,51 @@ class CommentService(
      * Fans a just-recorded COMMENTS notification out to the outbox, for internal rollout only
      * (plan §18, step 4.5): gated first by [commentsPushEnabledProvider] (`ENABLE_COMMENTS_PUSH`,
      * off by default — this is the "behind flag, rollout intern întâi" switch, independent of any
-     * per-user preference), then by the recipient's own `comments` notification preference. In
-     * either off case, the notification row itself is untouched — it's already been recorded
-     * above and stays in the inbox; only the push attempt is skipped. One outbox row is enqueued
-     * per active device; enqueue is idempotent on (notification_id, device_id), so calling this
-     * again for the same window/device (e.g. a second distinct actor joining before the first
-     * send drains) is harmless.
+     * per-user preference), then by the recipient's own `comments` notification preference and
+     * [INotificationPolicyService] (quiet hours plus hourly/daily caps). In any suppress case, the
+     * notification row itself is untouched — it's already been recorded above and stays in the
+     * inbox; only the push attempt is skipped. One outbox row is enqueued per active device;
+     * enqueue is idempotent on (notification_id, device_id), so calling this again for the same
+     * window/device (e.g. a second distinct actor joining before the first send drains) is
+     * harmless.
      */
     private suspend fun enqueuePushIfEligible(recipientId: UUID, notificationId: UUID) {
         if (commentsPushEnabledProvider() != "true") return
         val prefs = notificationPrefsDao.get(recipientId)
         if (!prefs.commentsEnabled) return
 
-        userDeviceDao.findActiveByUser(recipientId).forEach { device ->
-            notificationOutboxDao.enqueue(notificationId, device.id)
+        val devices = userDeviceDao.findActiveByUser(recipientId)
+        if (devices.isEmpty()) return
+
+        val now = Instant.now().atOffset(ZoneOffset.UTC)
+        val zone = devices.firstNotNullOfOrNull { device ->
+            device.timezone?.let { runCatching { ZoneId.of(it) }.getOrNull() }
+        }
+        val dayStart = zone
+            ?.let { now.atZoneSameInstant(it).toLocalDate().atStartOfDay(it).toOffsetDateTime() }
+            ?: now.toLocalDate().atStartOfDay().atOffset(ZoneOffset.UTC)
+        val hourStart = now.minusHours(1)
+        val comments = setOf(NotificationCategory.COMMENTS)
+        val nonAccountCategories = NotificationCategory.entries
+            .filterTo(mutableSetOf()) { it != NotificationCategory.ACCOUNT }
+
+        val decision = notificationPolicyService.evaluate(
+            NotificationPolicyInput(
+                category = NotificationCategory.COMMENTS,
+                categoryEnabled = prefs.commentsEnabled,
+                now = now,
+                zone = zone,
+                quietStart = prefs.quietStart,
+                quietEnd = prefs.quietEnd,
+                hourlyCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, comments, hourStart),
+                dailyCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, comments, dayStart),
+                dailyTotalCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, nonAccountCategories, dayStart),
+            ),
+        )
+        if (decision.verdict == NotificationVerdict.SUPPRESS) return
+
+        devices.forEach { device ->
+            notificationOutboxDao.enqueue(notificationId, device.id, notBefore = decision.notBefore)
         }
     }
 

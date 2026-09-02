@@ -3,8 +3,14 @@ package service
 import com.revio.server.core.storage.LocalImageStorageService
 import com.revio.server.features.notification.INotificationEventService
 import com.revio.server.features.notification.INotificationOutboxDAO
+import com.revio.server.features.notification.INotificationPolicyService
 import com.revio.server.features.notification.IUserDeviceDAO
 import com.revio.server.features.notification.IUserNotificationPrefsDAO
+import com.revio.server.features.notification.NotificationCategory
+import com.revio.server.features.notification.NotificationPolicyDecision
+import com.revio.server.features.notification.NotificationPolicyInput
+import com.revio.server.features.notification.NotificationPolicyService
+import com.revio.server.features.notification.NotificationVerdict
 import com.revio.server.features.post.IPostDAO
 import com.revio.server.features.post.PostOwnerInfo
 import com.revio.server.features.post.PostSource
@@ -31,6 +37,8 @@ import org.junit.jupiter.api.Test
 import java.nio.file.Path
 import java.sql.SQLException
 import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import java.util.UUID
 
 class CommentServiceTest {
@@ -53,7 +61,11 @@ class CommentServiceTest {
         deviceDao: IUserDeviceDAO = userDeviceDao,
         outboxDao: INotificationOutboxDAO = notificationOutboxDao,
         commentsPushEnabledProvider: () -> String? = { null },
-    ) = CommentService(dao, storage, pDao, scoring, notifications, prefsDao, deviceDao, outboxDao, commentsPushEnabledProvider)
+        policyService: INotificationPolicyService = NotificationPolicyService(),
+    ) = CommentService(
+        dao, storage, pDao, scoring, notifications, prefsDao, deviceDao, outboxDao,
+        commentsPushEnabledProvider, policyService,
+    )
 
     private fun fakeComment(
         id: UUID = UUID.randomUUID(),
@@ -448,6 +460,55 @@ class CommentServiceTest {
         coVerify(exactly = 0) { notificationOutboxDao.enqueue(any(), any(), isNull(), isNull()) }
     }
 
+    @Test
+    fun `quiet-hours policy defers a comment push while keeping its inbox event`() = runTest {
+        val userId = UUID.randomUUID()
+        val ownerId = UUID.randomUUID()
+        val postId = UUID.randomUUID()
+        val notificationId = UUID.randomUUID()
+        val device = fakeDevice(timezone = "Europe/Bucharest")
+        val deferredUntil = OffsetDateTime.now(ZoneOffset.UTC).plusHours(4)
+        val policyService = mockk<INotificationPolicyService>()
+        val inputSlot = slot<NotificationPolicyInput>()
+        setUpEligibleNotificationCall(userId, ownerId, postId, notificationId)
+        coEvery { notificationPrefsDao.get(ownerId) } returns fakePrefs(ownerId, commentsEnabled = true)
+        coEvery { userDeviceDao.findActiveByUser(ownerId) } returns listOf(device)
+        every { policyService.evaluate(capture(inputSlot), any()) } returns
+            NotificationPolicyDecision(NotificationVerdict.DEFER, notBefore = deferredUntil)
+
+        newService(commentsPushEnabledProvider = { "true" }, policyService = policyService)
+            .addComment(userId, postId, "hi")
+
+        assertEquals(NotificationCategory.COMMENTS, inputSlot.captured.category)
+        assertEquals(java.time.ZoneId.of("Europe/Bucharest"), inputSlot.captured.zone)
+        verify(exactly = 1) { notificationEventService.recordComment(any(), any(), any(), any(), any(), any(), isNull()) }
+        coVerify(exactly = 1) {
+            notificationOutboxDao.enqueue(notificationId, device.id, deferredUntil, isNull())
+        }
+    }
+
+    @Test
+    fun `social daily cap suppresses a comment push while keeping its inbox event`() = runTest {
+        val userId = UUID.randomUUID()
+        val ownerId = UUID.randomUUID()
+        val postId = UUID.randomUUID()
+        val notificationId = UUID.randomUUID()
+        setUpEligibleNotificationCall(userId, ownerId, postId, notificationId)
+        coEvery { notificationPrefsDao.get(ownerId) } returns fakePrefs(ownerId, commentsEnabled = true)
+        coEvery { userDeviceDao.findActiveByUser(ownerId) } returns listOf(fakeDevice())
+        coEvery {
+            notificationOutboxDao.countAcceptedNotificationsSince(ownerId, setOf(NotificationCategory.COMMENTS), any())
+        } returnsMany listOf(0, 8)
+        coEvery {
+            notificationOutboxDao.countAcceptedNotificationsSince(ownerId, match { it.size == 4 }, any())
+        } returns 8
+
+        newService(commentsPushEnabledProvider = { "true" }).addComment(userId, postId, "hi")
+
+        verify(exactly = 1) { notificationEventService.recordComment(any(), any(), any(), any(), any(), any(), isNull()) }
+        coVerify(exactly = 0) { notificationOutboxDao.enqueue(any(), any(), any(), any()) }
+    }
+
     private fun fakePrefs(userId: UUID, commentsEnabled: Boolean) = com.revio.server.features.notification.UserNotificationPrefs(
         userId = userId,
         likesEnabled = true,
@@ -458,7 +519,7 @@ class CommentServiceTest {
         quietEnd = java.time.LocalTime.of(8, 0),
     )
 
-    private fun fakeDevice() = com.revio.server.features.notification.UserDevice(
+    private fun fakeDevice(timezone: String? = null) = com.revio.server.features.notification.UserDevice(
         id = UUID.randomUUID(),
         userId = UUID.randomUUID(),
         deviceId = "device-${UUID.randomUUID()}",
@@ -466,7 +527,7 @@ class CommentServiceTest {
         firebaseProject = com.revio.server.features.notification.FirebaseProject.DEBUG,
         platform = com.revio.server.features.notification.DevicePlatform.ANDROID,
         appVersion = "1.0.0",
-        timezone = null,
+        timezone = timezone,
         locale = null,
         isActive = true,
     )

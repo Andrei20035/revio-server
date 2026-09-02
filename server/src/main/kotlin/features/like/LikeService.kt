@@ -2,14 +2,20 @@ package features.like
 
 import com.revio.server.features.notification.INotificationEventService
 import com.revio.server.features.notification.INotificationOutboxDAO
+import com.revio.server.features.notification.INotificationPolicyService
 import com.revio.server.features.notification.IUserDeviceDAO
 import com.revio.server.features.notification.IUserNotificationPrefsDAO
+import com.revio.server.features.notification.NotificationCategory
+import com.revio.server.features.notification.NotificationPolicyInput
+import com.revio.server.features.notification.NotificationPolicyService
+import com.revio.server.features.notification.NotificationVerdict
 import com.revio.server.features.post.IPostDAO
 import com.revio.server.features.scoring.IScoringService
 import com.revio.server.features.user.IUserDAO
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.UUID
 
@@ -17,6 +23,9 @@ class LikePostNotFoundException(postId: UUID) : RuntimeException("Post $postId n
 
 /** Debounce before a like notification's first scheduled send — plan §8.1 / §18 step 5.1. */
 private const val LIKE_NOTIFICATION_DEBOUNCE_SECONDS = 60L
+
+/** Freshness TTL for a like notification (plan §8.1: "6h") — a digest older than this is stale and abandoned rather than delivered late (step 4.3). */
+private const val LIKE_NOTIFICATION_FRESHNESS_HOURS = 6L
 
 interface ILikeService {
     suspend fun toggleLike(userId: UUID, postId: UUID): LikeStatusDTO
@@ -34,6 +43,7 @@ class LikeService(
     private val userDao: IUserDAO,
     private val notificationPrefsDao: IUserNotificationPrefsDAO,
     private val likesPushEnabledProvider: () -> String? = { System.getenv("ENABLE_LIKES_PUSH") },
+    private val notificationPolicyService: INotificationPolicyService = NotificationPolicyService(),
 ) : ILikeService {
 
     companion object {
@@ -154,21 +164,60 @@ class LikeService(
      * Fans a just-recorded LIKES notification out to the outbox, for internal rollout only (plan
      * §18, step 5.7): gated first by [likesPushEnabledProvider] (`ENABLE_LIKES_PUSH`, off by
      * default — the "behind flag" switch, independent of any per-user preference), then by the
-     * recipient's own `likes` notification preference. In either off case, the notification row
-     * itself is untouched — it's already been recorded above and stays in the inbox; only the
-     * push attempt is skipped. Mirrors [features.comment.CommentService]'s
-     * `enqueuePushIfEligible` (step 4.5), with [notBefore] carrying step 5.1's 60s debounce
-     * scheduling through unchanged. One outbox row is enqueued per active device; enqueue is
-     * idempotent on (notification_id, device_id), so calling this again for the same
-     * window/device is harmless.
+     * recipient's own `likes` notification preference and [INotificationPolicyService] (quiet
+     * hours plus hourly/daily caps). In any suppress case, the notification row itself is
+     * untouched — it's already been recorded above and stays in the inbox; only the push attempt
+     * is skipped. Mirrors [features.comment.CommentService]'s `enqueuePushIfEligible` (step 4.5).
+     * The effective schedule is the later of [notBefore]'s 60s debounce and a quiet-hours defer.
+     * Each row also carries an [LIKE_NOTIFICATION_FRESHNESS_HOURS]-hour `expiresAt` (step 4.3) —
+     * the processor drops rather than sends a like digest that's gone stale by dispatch time.
+     * One outbox row is enqueued per active device; enqueue is idempotent on
+     * (notification_id, device_id), so calling this again for the same window/device is harmless.
      */
     private suspend fun enqueuePushIfEligible(recipientId: UUID, notificationId: UUID, notBefore: OffsetDateTime) {
         if (likesPushEnabledProvider() != "true") return
         val prefs = notificationPrefsDao.get(recipientId)
         if (!prefs.likesEnabled) return
 
-        userDeviceDao.findActiveByUser(recipientId).forEach { device ->
-            notificationOutboxDao.enqueue(notificationId, device.id, notBefore = notBefore)
+        val devices = userDeviceDao.findActiveByUser(recipientId)
+        if (devices.isEmpty()) return
+
+        val now = Instant.now().atOffset(ZoneOffset.UTC)
+        val zone = devices.firstNotNullOfOrNull { device ->
+            device.timezone?.let { runCatching { ZoneId.of(it) }.getOrNull() }
+        }
+        val dayStart = zone
+            ?.let { now.atZoneSameInstant(it).toLocalDate().atStartOfDay(it).toOffsetDateTime() }
+            ?: now.toLocalDate().atStartOfDay().atOffset(ZoneOffset.UTC)
+        val hourStart = now.minusHours(1)
+        val likes = setOf(NotificationCategory.LIKES)
+        val comments = setOf(NotificationCategory.COMMENTS)
+        val nonAccountCategories = NotificationCategory.entries
+            .filterTo(mutableSetOf()) { it != NotificationCategory.ACCOUNT }
+
+        val decision = notificationPolicyService.evaluate(
+            NotificationPolicyInput(
+                category = NotificationCategory.LIKES,
+                categoryEnabled = prefs.likesEnabled,
+                now = now,
+                zone = zone,
+                quietStart = prefs.quietStart,
+                quietEnd = prefs.quietEnd,
+                hourlyCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, likes, hourStart),
+                dailyCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, likes, dayStart),
+                otherSocialHourlyCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, comments, hourStart),
+                otherSocialDailyCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, comments, dayStart),
+                dailyTotalCount = notificationOutboxDao.countAcceptedNotificationsSince(recipientId, nonAccountCategories, dayStart),
+            ),
+        )
+        if (decision.verdict == NotificationVerdict.SUPPRESS) return
+
+        val effectiveNotBefore = decision.notBefore
+            ?.takeIf { it.isAfter(notBefore) }
+            ?: notBefore
+        val expiresAt = now.plusHours(LIKE_NOTIFICATION_FRESHNESS_HOURS)
+        devices.forEach { device ->
+            notificationOutboxDao.enqueue(notificationId, device.id, notBefore = effectiveNotBefore, expiresAt = expiresAt)
         }
     }
 

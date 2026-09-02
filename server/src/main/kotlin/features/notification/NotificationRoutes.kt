@@ -26,9 +26,10 @@ fun Route.notificationRoutes() {
                 val cursorNotificationId = call.request.queryParameters["cursorNotificationId"]
 
                 try {
+                    val category = call.request.queryParameters["category"]?.let { NotificationCategory.fromParam(it) }
                     call.respond(
                         HttpStatusCode.OK,
-                        notificationService.listForUserPage(userId, limit, cursorCreatedAt, cursorNotificationId),
+                        notificationService.listForUserPage(userId, limit, cursorCreatedAt, cursorNotificationId, category),
                     )
                 } catch (e: IllegalArgumentException) {
                     call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "Invalid request")))
@@ -53,8 +54,13 @@ fun Route.notificationRoutes() {
                 val userId = call.getUuidClaim("userId")
                     ?: return@post call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Invalid or missing userId"))
 
-                val count = notificationService.markAllRead(userId)
-                call.respond(HttpStatusCode.OK, mapOf("updated" to count))
+                try {
+                    val category = call.request.queryParameters["category"]?.let { NotificationCategory.fromParam(it) }
+                    val count = notificationService.markAllRead(userId, category)
+                    call.respond(HttpStatusCode.OK, mapOf("updated" to count))
+                } catch (e: IllegalArgumentException) {
+                    call.respond(HttpStatusCode.BadRequest, mapOf("error" to (e.message ?: "Invalid request")))
+                }
             }
         }
     }

@@ -7,6 +7,7 @@ import com.revio.server.config.configureHTTP
 import com.revio.server.config.configureHealth
 import com.revio.server.config.configureMetrics
 import com.revio.server.config.configureMonitoring
+import com.revio.server.config.configureNotificationAlertEvaluator
 import com.revio.server.config.configurePushDispatcher
 import com.revio.server.config.configureRouting
 import com.revio.server.config.configureSecurity
@@ -94,6 +95,7 @@ fun Application.module() {
     configureSwagger()
     configureRouting()
     configurePushDispatcher()
+    configureNotificationAlertEvaluator()
 
     // Dev-only convenience: when the external cron (see /admin/leaderboard/snapshot/today)
     // hasn't run yet, this backfills today's leaderboard snapshot once at boot so

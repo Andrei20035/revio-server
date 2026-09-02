@@ -4,8 +4,14 @@ import com.revio.server.features.notification.DevicePlatform
 import com.revio.server.features.notification.FirebaseProject
 import com.revio.server.features.notification.INotificationEventService
 import com.revio.server.features.notification.INotificationOutboxDAO
+import com.revio.server.features.notification.INotificationPolicyService
 import com.revio.server.features.notification.IUserDeviceDAO
 import com.revio.server.features.notification.IUserNotificationPrefsDAO
+import com.revio.server.features.notification.NotificationCategory
+import com.revio.server.features.notification.NotificationPolicyDecision
+import com.revio.server.features.notification.NotificationPolicyInput
+import com.revio.server.features.notification.NotificationPolicyService
+import com.revio.server.features.notification.NotificationVerdict
 import com.revio.server.features.notification.UserDevice
 import com.revio.server.features.notification.UserNotificationPrefs
 import com.revio.server.features.post.IPostDAO
@@ -38,6 +44,7 @@ import org.junit.jupiter.api.Test
 import java.sql.SQLException
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import java.util.UUID
 
 class LikeServiceTest {
@@ -63,7 +70,11 @@ class LikeServiceTest {
         uDao: IUserDAO = userDao,
         prefsDao: IUserNotificationPrefsDAO = notificationPrefsDao,
         likesPushEnabledProvider: () -> String? = { null },
-    ) = LikeService(dao, pDao, scoring, notifications, deviceDao, outboxDao, cursorDao, uDao, prefsDao, likesPushEnabledProvider)
+        policyService: INotificationPolicyService = NotificationPolicyService(),
+    ) = LikeService(
+        dao, pDao, scoring, notifications, deviceDao, outboxDao, cursorDao, uDao, prefsDao,
+        likesPushEnabledProvider, policyService,
+    )
 
     private fun fakePrefs(userId: UUID, likesEnabled: Boolean) = UserNotificationPrefs(
         userId = userId,
@@ -489,7 +500,7 @@ class LikeServiceTest {
         coEvery { userDeviceDao.findActiveByUser(ownerId) } returns listOf(device)
         val notBeforeSlot = slot<OffsetDateTime>()
         coEvery {
-            notificationOutboxDao.enqueue(eq(notificationId), eq(device.id), capture(notBeforeSlot), isNull())
+            notificationOutboxDao.enqueue(eq(notificationId), eq(device.id), capture(notBeforeSlot), any())
         } just Runs
 
         val before = Instant.now()
@@ -585,8 +596,8 @@ class LikeServiceTest {
 
         newService(likesPushEnabledProvider = { "true" }).toggleLike(userId, postId)
 
-        coVerify(exactly = 1) { notificationOutboxDao.enqueue(notificationId, deviceA.id, any(), isNull()) }
-        coVerify(exactly = 1) { notificationOutboxDao.enqueue(notificationId, deviceB.id, any(), isNull()) }
+        coVerify(exactly = 1) { notificationOutboxDao.enqueue(notificationId, deviceA.id, any(), any()) }
+        coVerify(exactly = 1) { notificationOutboxDao.enqueue(notificationId, deviceB.id, any(), any()) }
     }
 
     @Test
@@ -606,6 +617,77 @@ class LikeServiceTest {
 
         newService(likesPushEnabledProvider = { "true" }).toggleLike(userId, postId)
 
+        coVerify(exactly = 0) { notificationOutboxDao.enqueue(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `quiet-hours policy defers a like push while keeping its inbox event`() = runTest {
+        val userId = UUID.randomUUID()
+        val ownerId = UUID.randomUUID()
+        val postId = UUID.randomUUID()
+        val notificationId = UUID.randomUUID()
+        val device = UserDevice(
+            id = UUID.randomUUID(), userId = ownerId, deviceId = "device-policy-defer", fcmToken = "token-policy-defer",
+            firebaseProject = FirebaseProject.DEBUG, platform = DevicePlatform.ANDROID,
+            appVersion = "1.0.0", timezone = "Europe/Bucharest", locale = null, isActive = true,
+        )
+        val deferredUntil = OffsetDateTime.now(ZoneOffset.UTC).plusHours(4)
+        val policyService = mockk<INotificationPolicyService>()
+        val inputSlot = slot<NotificationPolicyInput>()
+
+        coEvery { likeDao.hasUserLikedPost(userId, postId) } returns false
+        coEvery { likeDao.getLikeCount(postId) } returns 1L
+        stubCameraPost(postId, ownerId)
+        coEvery { likeNotificationCursorDao.find(postId, userId) } returns null
+        every { notificationEventService.recordLike(any(), any(), any(), any(), any(), any()) } returns notificationId
+        coEvery { notificationPrefsDao.get(ownerId) } returns fakePrefs(ownerId, likesEnabled = true)
+        coEvery { userDeviceDao.findActiveByUser(ownerId) } returns listOf(device)
+        every { policyService.evaluate(capture(inputSlot), any()) } returns
+            NotificationPolicyDecision(NotificationVerdict.DEFER, notBefore = deferredUntil)
+
+        newService(likesPushEnabledProvider = { "true" }, policyService = policyService)
+            .toggleLike(userId, postId)
+
+        assertEquals(NotificationCategory.LIKES, inputSlot.captured.category)
+        assertEquals(java.time.ZoneId.of("Europe/Bucharest"), inputSlot.captured.zone)
+        verify(exactly = 1) { notificationEventService.recordLike(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) {
+            notificationOutboxDao.enqueue(notificationId, device.id, deferredUntil, any())
+        }
+    }
+
+    @Test
+    fun `social hourly cap suppresses a like push while keeping its inbox event`() = runTest {
+        val userId = UUID.randomUUID()
+        val ownerId = UUID.randomUUID()
+        val postId = UUID.randomUUID()
+        val notificationId = UUID.randomUUID()
+        val device = UserDevice(
+            id = UUID.randomUUID(), userId = ownerId, deviceId = "device-policy-cap", fcmToken = "token-policy-cap",
+            firebaseProject = FirebaseProject.DEBUG, platform = DevicePlatform.ANDROID,
+            appVersion = "1.0.0", timezone = null, locale = null, isActive = true,
+        )
+
+        coEvery { likeDao.hasUserLikedPost(userId, postId) } returns false
+        coEvery { likeDao.getLikeCount(postId) } returns 1L
+        stubCameraPost(postId, ownerId)
+        coEvery { likeNotificationCursorDao.find(postId, userId) } returns null
+        every { notificationEventService.recordLike(any(), any(), any(), any(), any(), any()) } returns notificationId
+        coEvery { notificationPrefsDao.get(ownerId) } returns fakePrefs(ownerId, likesEnabled = true)
+        coEvery { userDeviceDao.findActiveByUser(ownerId) } returns listOf(device)
+        coEvery {
+            notificationOutboxDao.countAcceptedNotificationsSince(ownerId, setOf(NotificationCategory.LIKES), any())
+        } returns 3
+        coEvery {
+            notificationOutboxDao.countAcceptedNotificationsSince(ownerId, setOf(NotificationCategory.COMMENTS), any())
+        } returns 0
+        coEvery {
+            notificationOutboxDao.countAcceptedNotificationsSince(ownerId, match { it.size == 4 }, any())
+        } returns 3
+
+        newService(likesPushEnabledProvider = { "true" }).toggleLike(userId, postId)
+
+        verify(exactly = 1) { notificationEventService.recordLike(any(), any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { notificationOutboxDao.enqueue(any(), any(), any(), any()) }
     }
 

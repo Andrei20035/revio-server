@@ -48,6 +48,7 @@ data class NotificationMetricsSnapshot(
     val outboxFailedByCode: Map<String, Long>,
     val outboxDead: Long,
     val outboxDroppedExpired: Long,
+    val outboxUnconfiguredByProject: Map<String, Long>,
     val devicesDeactivatedByReason: Map<String, Long>,
     val dispatchLockContention: Long,
     val fcmLatencyMsP50: Long,
@@ -72,6 +73,7 @@ object NotificationMetrics {
     private val outboxFailed = countersByKey()
     private val outboxDeadCounter = AtomicLong(0)
     private val outboxDroppedExpiredCounter = AtomicLong(0)
+    private val outboxUnconfigured = countersByKey()
     private val devicesDeactivated = countersByKey()
     private val dispatchLockContentionCounter = AtomicLong(0)
     private val fcmLatencyMs = LatencySampleBuffer()
@@ -104,6 +106,9 @@ object NotificationMetrics {
     /** `outbox.dropped_expired` — a row's freshness TTL passed before it could be sent. */
     fun outboxDroppedExpired() = outboxDroppedExpiredCounter.incrementAndGet()
 
+    /** `outbox.unconfigured{project}` — a send was skipped because that Firebase project has no usable FCM credential (see [com.revio.server.features.notification.FcmCredentialsProvider]). Row stays PENDING and is retried next tick. */
+    fun outboxUnconfigured(project: String) = outboxUnconfigured.increment(project)
+
     /** `devices.deactivated{reason}` — a device row was deactivated (session revoke, or FCM rejected its token outright). */
     fun deviceDeactivated(reason: String) = devicesDeactivated.increment(reason)
 
@@ -130,6 +135,7 @@ object NotificationMetrics {
             outboxFailedByCode = outboxFailed.snapshot(),
             outboxDead = outboxDeadCounter.get(),
             outboxDroppedExpired = outboxDroppedExpiredCounter.get(),
+            outboxUnconfiguredByProject = outboxUnconfigured.snapshot(),
             devicesDeactivatedByReason = devicesDeactivated.snapshot(),
             dispatchLockContention = dispatchLockContentionCounter.get(),
             fcmLatencyMsP50 = percentile(fcmSorted, 0.50),
@@ -157,6 +163,7 @@ fun renderNotificationMetrics(snapshot: NotificationMetricsSnapshot, queueDepth:
     snapshot.suppressedByReason.toSortedMap().forEach { (k, v) -> sb.appendLine("notifications_suppressed{reason=\"$k\"} $v") }
     snapshot.deferredByCategory.toSortedMap().forEach { (k, v) -> sb.appendLine("notifications_deferred{category=\"$k\"} $v") }
     snapshot.outboxFailedByCode.toSortedMap().forEach { (k, v) -> sb.appendLine("outbox_failed{code=\"$k\"} $v") }
+    snapshot.outboxUnconfiguredByProject.toSortedMap().forEach { (k, v) -> sb.appendLine("outbox_unconfigured{project=\"$k\"} $v") }
     snapshot.devicesDeactivatedByReason.toSortedMap().forEach { (k, v) -> sb.appendLine("devices_deactivated{reason=\"$k\"} $v") }
     return sb.toString()
 }
