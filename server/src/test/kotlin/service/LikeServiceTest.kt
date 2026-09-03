@@ -82,6 +82,7 @@ class LikeServiceTest {
         commentsEnabled = true,
         discoveryEnabled = true,
         remindersEnabled = true,
+        challengesEnabled = true,
         quietStart = java.time.LocalTime.MIDNIGHT,
         quietEnd = java.time.LocalTime.of(8, 0),
     )

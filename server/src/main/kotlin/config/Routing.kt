@@ -14,6 +14,7 @@ import com.revio.server.features.friend_request.friendRequestRoutes
 import com.revio.server.features.leaderboard.adminLeaderboardRoutes
 import com.revio.server.features.leaderboard.leaderboardRoutes
 import com.revio.server.features.moderation.moderationAdminRoutes
+import com.revio.server.features.notification.challengeStartRoutes
 import com.revio.server.features.notification.deviceRoutes
 import com.revio.server.features.notification.discoveryRoutes
 import com.revio.server.features.notification.inactivityRoutes
@@ -50,6 +51,7 @@ fun Application.configureRouting() {
             carModelRoutes()
             challengeAdminRoutes()
             challengeRoutes()
+            challengeStartRoutes()
             commentRoutes()
             deviceRoutes()
             discoveryRoutes()

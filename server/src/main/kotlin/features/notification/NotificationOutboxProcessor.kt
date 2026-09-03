@@ -68,6 +68,8 @@ internal data class OutboxNotificationInfo(
     val deepLink: String?,
     val postId: UUID?,
     val commentId: UUID?,
+    /** Target challenge for a CHALLENGES row (push-notifications plan, "challenge is live" work) — see [NotificationTable.challengeId]. */
+    val challengeId: UUID?,
     /** Non-null only for a day-7 inactivity reminder (plan §9 / §18, step 6.5) — see [NotificationTable.enqueuedDeltaPoints]. */
     val enqueuedDeltaPoints: Int?,
 )
@@ -82,6 +84,7 @@ private fun findNotificationInfo(notificationId: UUID): OutboxNotificationInfo? 
             NotificationTable.deepLink,
             NotificationTable.postId,
             NotificationTable.commentId,
+            NotificationTable.challengeId,
             NotificationTable.enqueuedDeltaPoints,
         )
         .where { NotificationTable.id eq notificationId }
@@ -95,6 +98,7 @@ private fun findNotificationInfo(notificationId: UUID): OutboxNotificationInfo? 
                 deepLink = row[NotificationTable.deepLink],
                 postId = row[NotificationTable.postId]?.value,
                 commentId = row[NotificationTable.commentId]?.value,
+                challengeId = row[NotificationTable.challengeId]?.value,
                 enqueuedDeltaPoints = row[NotificationTable.enqueuedDeltaPoints],
             )
         }
@@ -106,6 +110,7 @@ private fun buildDataPayload(notificationId: UUID, info: OutboxNotificationInfo)
     info.deepLink?.let { put("deep_link", it) }
     info.postId?.let { put("post_id", it.toString()) }
     info.commentId?.let { put("comment_id", it.toString()) }
+    info.challengeId?.let { put("challenge_id", it.toString()) }
 }
 
 /**
@@ -150,7 +155,10 @@ interface INotificationOutboxProcessor {
      * quiet-hours-deferred events all becoming due at once when quiet hours end. Collapsing only
      * changes how many FCM calls are made and how those rows' outbox state is updated; the
      * underlying `user_notifications` rows are never touched by this class, so the inbox always
-     * keeps one row per original event.
+     * keeps one row per original event. A CHALLENGES row is the one exception: it is never
+     * collapsed with anything else (push-notifications plan, §9/§14) — collapsing would replace
+     * its "challenge is live" copy and its `challenge_id`-carrying deep link with the generic
+     * "While you were away" summary, which has neither.
      */
     suspend fun processDueBatch(limit: Int = 100)
 }
@@ -215,7 +223,17 @@ class NotificationOutboxProcessor(
             resolved += Resolved(entry, info, device)
         }
 
-        for (group in resolved.groupBy { it.info.recipientId to it.device.id }.values) {
+        // CHALLENGES rows are excluded from the collapsing groupBy entirely and always sent
+        // individually — grouping them in with LIKES/COMMENTS/etc. would let a collapsed send
+        // swallow the "challenge is live" copy and its challenge_id deep link into the generic
+        // backlog summary, which carries neither (see processDueBatch's KDoc).
+        val (challengeRows, collapsibleRows) = resolved.partition { it.info.category == NotificationCategory.CHALLENGES }
+
+        for (resolvedItem in challengeRows) {
+            sendOne(resolvedItem, now)
+        }
+
+        for (group in collapsibleRows.groupBy { it.info.recipientId to it.device.id }.values) {
             if (group.size == 1) {
                 sendOne(group.single(), now)
             } else {

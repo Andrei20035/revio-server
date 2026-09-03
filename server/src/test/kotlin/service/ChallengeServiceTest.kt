@@ -73,6 +73,7 @@ class ChallengeServiceTest {
         publishedAt = null,
         cancelledAt = null,
         finalizedAt = finalizedAt,
+        notifiedStartedAt = null,
     )
 
     private fun service(

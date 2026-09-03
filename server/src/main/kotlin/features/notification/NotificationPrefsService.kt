@@ -34,6 +34,7 @@ class NotificationPrefsService(
             commentsEnabled = request.commentsEnabled,
             discoveryEnabled = request.discoveryEnabled,
             remindersEnabled = request.remindersEnabled,
+            challengesEnabled = request.challengesEnabled,
             quietStart = request.quietStart,
             quietEnd = request.quietEnd,
         )

@@ -22,6 +22,7 @@ class NotificationBacklogCollapseCopyTest {
         deepLink = null,
         postId = null,
         commentId = null,
+        challengeId = null,
         enqueuedDeltaPoints = null,
     )
 

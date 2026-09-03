@@ -54,6 +54,23 @@ interface IChallengeDAO {
      */
     suspend fun markFinalized(id: UUID, finalizedAt: Instant): Int
 
+    /**
+     * SCHEDULED challenges whose window has just opened (`starts_at <= now`, `ends_at > now`)
+     * and haven't had their "challenge is live" push fan-out run yet (`notified_started_at IS
+     * NULL`), soonest-started first — the set [com.revio.server.features.notification.ChallengeStartJob]
+     * works through. DRAFT, CANCELLED, not-yet-started, already-ended, and already-notified
+     * challenges are never candidates. Mirrors [findDueForFinalization]'s shape.
+     */
+    suspend fun findDueForStartNotification(now: Instant, limit: Int): List<Challenge>
+
+    /**
+     * Marks [id]'s "challenge is live" fan-out as done at [notifiedAt], scoped to
+     * `notified_started_at IS NULL` in the UPDATE itself so a concurrent/retried run is a
+     * harmless no-op rather than overwriting an already-set timestamp. Returns the number of
+     * rows updated (0 or 1). Mirrors [markFinalized]'s shape.
+     */
+    suspend fun markStartNotified(id: UUID, notifiedAt: Instant): Int
+
     suspend fun updateStatus(id: UUID, status: ChallengeStatus, publishedAt: Instant? = null, cancelledAt: Instant? = null): Int
 
     /** Updates only the fields still editable once a challenge is SCHEDULED (title/description). */
@@ -176,6 +193,27 @@ class ChallengeDAO : IChallengeDAO {
     override suspend fun markFinalized(id: UUID, finalizedAt: Instant): Int = transaction {
         ChallengeTable.update({ (ChallengeTable.id eq id) and (ChallengeTable.finalizedAt.isNull()) }) {
             it[ChallengeTable.finalizedAt] = finalizedAt.atOffset(ZoneOffset.UTC)
+        }
+    }
+
+    override suspend fun findDueForStartNotification(now: Instant, limit: Int): List<Challenge> = transaction {
+        val nowOffset = now.atOffset(ZoneOffset.UTC)
+        ChallengeTable
+            .selectAll()
+            .where {
+                (ChallengeTable.status eq ChallengeStatus.SCHEDULED) and
+                    (ChallengeTable.startsAt lessEq nowOffset) and
+                    (ChallengeTable.endsAt greater nowOffset) and
+                    (ChallengeTable.notifiedStartedAt.isNull())
+            }
+            .orderBy(ChallengeTable.startsAt to SortOrder.ASC)
+            .limit(limit)
+            .map { it.toChallenge() }
+    }
+
+    override suspend fun markStartNotified(id: UUID, notifiedAt: Instant): Int = transaction {
+        ChallengeTable.update({ (ChallengeTable.id eq id) and (ChallengeTable.notifiedStartedAt.isNull()) }) {
+            it[ChallengeTable.notifiedStartedAt] = notifiedAt.atOffset(ZoneOffset.UTC)
         }
     }
 

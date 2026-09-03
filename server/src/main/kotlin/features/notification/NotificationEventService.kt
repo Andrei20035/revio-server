@@ -5,6 +5,7 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.insertIgnoreAndGetId
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
@@ -38,6 +39,8 @@ interface INotificationEventService {
         targetType: NotificationTargetType = NotificationTargetType.NONE,
         postId: UUID? = null,
         commentId: UUID? = null,
+        /** The challenge a CHALLENGES-category row's deep link points at. Null for every other category. */
+        challengeId: UUID? = null,
         title: String,
         body: String,
         deepLink: String? = null,
@@ -65,6 +68,7 @@ interface INotificationEventService {
         targetType: NotificationTargetType = NotificationTargetType.NONE,
         postId: UUID? = null,
         commentId: UUID? = null,
+        challengeId: UUID? = null,
         title: String,
         body: String,
         deepLink: String? = null,
@@ -143,6 +147,31 @@ interface INotificationEventService {
      * instead. No-op if no such row exists.
      */
     fun withdrawLikeActor(recipientId: UUID, dedupeKey: String)
+
+    /**
+     * Persists a broadcast notification event for [recipientId] — "this happened once", not "N
+     * actors did this" — in its own transaction. Unlike [record]/[recordInCurrentTransaction],
+     * which upsert on `(recipientId, dedupeKey)` and increment `actor_count` on every call, this
+     * inserts at most one row per key: `INSERT ... ON CONFLICT (user_id, dedupe_key) DO NOTHING`.
+     * A second call with the same [dedupeKey] is a no-op — `actor_count` stays 1 and
+     * `title`/`body`/`deep_link` are never rewritten — so a caller that retries after a partial
+     * failure (e.g. a broadcast fan-out re-run) never re-renders or duplicates an event it already
+     * recorded.
+     *
+     * @return the id of the (newly inserted, or already-existing) `user_notifications` row.
+     */
+    fun recordBroadcast(
+        recipientId: UUID,
+        category: NotificationCategory,
+        dedupeKey: String,
+        targetType: NotificationTargetType = NotificationTargetType.NONE,
+        postId: UUID? = null,
+        commentId: UUID? = null,
+        challengeId: UUID? = null,
+        title: String,
+        body: String,
+        deepLink: String? = null,
+    ): UUID
 }
 
 /**
@@ -201,14 +230,15 @@ class NotificationEventService : INotificationEventService {
         targetType: NotificationTargetType,
         postId: UUID?,
         commentId: UUID?,
+        challengeId: UUID?,
         title: String,
         body: String,
         deepLink: String?,
         enqueuedDeltaPoints: Int?,
     ): UUID = transaction {
         recordInCurrentTransaction(
-            recipientId, category, dedupeKey, actorId, actorUsername, targetType, postId, commentId, title, body, deepLink,
-            enqueuedDeltaPoints,
+            recipientId, category, dedupeKey, actorId, actorUsername, targetType, postId, commentId, challengeId, title, body,
+            deepLink, enqueuedDeltaPoints,
         )
     }
 
@@ -221,11 +251,15 @@ class NotificationEventService : INotificationEventService {
         targetType: NotificationTargetType,
         postId: UUID?,
         commentId: UUID?,
+        challengeId: UUID?,
         title: String,
         body: String,
         deepLink: String?,
         enqueuedDeltaPoints: Int?,
-    ): UUID = upsert(recipientId, category, dedupeKey, actorId, actorUsername, targetType, postId, commentId, deepLink, enqueuedDeltaPoints) { _ ->
+    ): UUID = upsert(
+        recipientId, category, dedupeKey, actorId, actorUsername, targetType, postId, commentId, challengeId, deepLink,
+        enqueuedDeltaPoints,
+    ) { _ ->
         title to body
     }
 
@@ -326,6 +360,54 @@ class NotificationEventService : INotificationEventService {
         Unit
     }
 
+    override fun recordBroadcast(
+        recipientId: UUID,
+        category: NotificationCategory,
+        dedupeKey: String,
+        targetType: NotificationTargetType,
+        postId: UUID?,
+        commentId: UUID?,
+        challengeId: UUID?,
+        title: String,
+        body: String,
+        deepLink: String?,
+    ): UUID = transaction {
+        val now = Instant.now()
+        val insertedId = NotificationTable.insertIgnoreAndGetId {
+            it[NotificationTable.userId] = recipientId
+            it[NotificationTable.type] = NotificationType.SOCIAL
+            it[NotificationTable.category] = category
+            it[NotificationTable.dedupeKey] = dedupeKey
+            it[NotificationTable.targetType] = targetType
+            it[NotificationTable.postId] = postId
+            it[NotificationTable.commentId] = commentId
+            it[NotificationTable.challengeId] = challengeId
+            it[NotificationTable.title] = title
+            it[NotificationTable.body] = body
+            it[NotificationTable.deepLink] = deepLink
+            it[NotificationTable.blocking] = false
+            it[NotificationTable.createdAt] = now
+            it[NotificationTable.updatedAt] = now
+        }
+
+        if (insertedId != null) {
+            NotificationMetrics.eventCreated(category.name.lowercase())
+            return@transaction insertedId.value
+        }
+
+        // Conflict: a row for (recipientId, dedupeKey) already exists — return its id rather than
+        // inserting a duplicate. Under this codebase's REPEATABLE READ isolation
+        // (config/Databases.kt), a losing transaction's own snapshot can in principle predate the
+        // winner's commit — see ChallengeProgressDAO.kt's identical insertIgnore-race note — so
+        // this SELECT is not airtight against a same-instant race. Not a concern for this method's
+        // intended callers: recordBroadcast exists for idempotent retries (well after the original
+        // insert committed), not for two callers racing to create the same event simultaneously.
+        NotificationTable
+            .select(NotificationTable.id)
+            .where { (NotificationTable.userId eq recipientId) and (NotificationTable.dedupeKey eq dedupeKey) }
+            .single()[NotificationTable.id].value
+    }
+
     /**
      * Shared upsert mechanics for every `record*` variant: locks the existing row (if any) for
      * `(recipientId, dedupeKey)`, computes the actor count the write will end up with, lets
@@ -343,6 +425,7 @@ class NotificationEventService : INotificationEventService {
         targetType: NotificationTargetType,
         postId: UUID?,
         commentId: UUID?,
+        challengeId: UUID? = null,
         deepLink: String?,
         enqueuedDeltaPoints: Int? = null,
         renderCopy: (newActorCount: Int) -> Pair<String, String>,
@@ -367,6 +450,7 @@ class NotificationEventService : INotificationEventService {
                 it[NotificationTable.targetType] = targetType
                 it[NotificationTable.postId] = postId
                 it[NotificationTable.commentId] = commentId
+                it[NotificationTable.challengeId] = challengeId
                 it[NotificationTable.title] = title
                 it[NotificationTable.body] = body
                 it[NotificationTable.deepLink] = deepLink
@@ -385,6 +469,7 @@ class NotificationEventService : INotificationEventService {
             it[NotificationTable.targetType] = targetType
             it[NotificationTable.postId] = postId
             it[NotificationTable.commentId] = commentId
+            it[NotificationTable.challengeId] = challengeId
             it[NotificationTable.actorCount] = newActorCount
             it[NotificationTable.lastActorUserId] = actorId
             it[NotificationTable.lastActorUsername] = actorUsername

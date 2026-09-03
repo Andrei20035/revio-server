@@ -13,6 +13,7 @@ import com.revio.server.features.notification.NotificationOutboxDAO
 import com.revio.server.features.notification.NotificationOutboxProcessor
 import com.revio.server.features.notification.NotificationOutboxTable
 import com.revio.server.features.notification.NotificationTable
+import com.revio.server.features.notification.NotificationTargetType
 import com.revio.server.features.notification.OutboxState
 import com.revio.server.features.notification.UserDeviceDAO
 import com.revio.server.features.leaderboard.LeaderboardDAO
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import testutils.ChallengeTestSeed
 import testutils.TestDatabaseFactory
 import testutils.UserTestSeed
 import java.time.Instant
@@ -68,6 +70,8 @@ class NotificationOutboxProcessorTest {
     ) : IPushDispatchService {
         val calls = mutableListOf<String>()
         val ttlSecondsByCall = mutableListOf<Long?>()
+        val dataByCall = mutableListOf<Map<String, String>>()
+        val priorityByCall = mutableListOf<FcmPriority>()
 
         override suspend fun send(
             project: FirebaseProject,
@@ -81,6 +85,8 @@ class NotificationOutboxProcessorTest {
             val index = calls.size
             calls.add(fcmToken)
             ttlSecondsByCall.add(ttlSeconds)
+            dataByCall.add(data)
+            priorityByCall.add(priority)
             return resultFor(index, fcmToken)
         }
     }
@@ -111,6 +117,29 @@ class NotificationOutboxProcessorTest {
             title = "Alex liked your spot",
             body = "",
         )
+    }
+
+    /** @return the seeded challenge's id, and the CHALLENGES notification recorded for it, in that order. */
+    private fun seedChallengeNotification(userId: UUID, dedupeKey: String): Pair<UUID, UUID> {
+        val familyId = ChallengeTestSeed.seedFamily()
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId,
+            startsAt = Instant.now().minusSeconds(3600),
+            endsAt = Instant.now().plusSeconds(3600),
+        )
+        val notificationId = transaction {
+            eventService.recordBroadcast(
+                recipientId = userId,
+                category = NotificationCategory.CHALLENGES,
+                dedupeKey = dedupeKey,
+                targetType = NotificationTargetType.CHALLENGE,
+                challengeId = challengeId,
+                title = "🏁 New challenge is live",
+                body = "Tap to see the details and start spotting.",
+                deepLink = "challenge",
+            )
+        }
+        return challengeId to notificationId
     }
 
     private fun outboxRow(id: UUID) = transaction {
@@ -444,5 +473,69 @@ class NotificationOutboxProcessorTest {
         processor.processDueBatch()
 
         assertEquals("Alex liked your spot", notificationRow(notificationId)[NotificationTable.title])
+    }
+
+    // ---------- CHALLENGES: payload, priority, TTL, and never-collapse (push-notifications plan, "challenge is live" work) ----------
+
+    @Test
+    fun `a CHALLENGES payload carries deep_link and challenge_id, sent at NORMAL priority`() = runTest {
+        val userId = seedUser("challenge-payload@example.com", "challengepayload")
+        seedDevice(userId, "device-challenge-payload", "token-challenge-payload")
+        val device = deviceDao.findByUserAndDevice(userId, "device-challenge-payload")!!
+        val (challengeId, notificationId) = seedChallengeNotification(userId, "challenge_started:payload-test")
+        outboxDao.enqueue(notificationId, device.id)
+
+        val fake = FakePushDispatchService { _, _ -> FcmSendResult.Accepted("msg-challenge-payload") }
+        val processor = NotificationOutboxProcessor(outboxDao, deviceDao, fake, leaderboardDao, leaderboardDeltaService)
+        processor.processDueBatch()
+
+        assertEquals(1, fake.calls.size)
+        val data = fake.dataByCall.single()
+        assertEquals("challenge", data["deep_link"])
+        assertEquals(challengeId.toString(), data["challenge_id"])
+        assertEquals(FcmPriority.NORMAL, fake.priorityByCall.single())
+    }
+
+    @Test
+    fun `a CHALLENGES row's TTL is derived from its outbox row's expiresAt, same as any other category`() = runTest {
+        val userId = seedUser("challenge-ttl@example.com", "challengettl")
+        seedDevice(userId, "device-challenge-ttl", "token-challenge-ttl")
+        val device = deviceDao.findByUserAndDevice(userId, "device-challenge-ttl")!!
+        val (_, notificationId) = seedChallengeNotification(userId, "challenge_started:ttl-test")
+        outboxDao.enqueue(notificationId, device.id, expiresAt = Instant.now().atOffset(ZoneOffset.UTC).plusHours(6))
+
+        val fake = FakePushDispatchService { _, _ -> FcmSendResult.Accepted("msg-challenge-ttl") }
+        val processor = NotificationOutboxProcessor(outboxDao, deviceDao, fake, leaderboardDao, leaderboardDeltaService)
+        processor.processDueBatch()
+
+        assertEquals(1, fake.calls.size)
+        val ttlSeconds = fake.ttlSecondsByCall.single()
+        assertTrue(ttlSeconds != null, "expected android.ttl to be set for a CHALLENGES row with a future expiresAt")
+        assertTrue(ttlSeconds!! in (6L * 3600 - 60)..(6L * 3600), "expected ~6h of ttl, was ${ttlSeconds}s")
+    }
+
+    @Test
+    fun `a CHALLENGES row due alongside a LIKE on the same device produces two sends, never one collapsed`() = runTest {
+        val userId = seedUser("challenge-nocollapse@example.com", "challengenocollapse")
+        seedDevice(userId, "device-challenge-nocollapse", "token-challenge-nocollapse")
+        val device = deviceDao.findByUserAndDevice(userId, "device-challenge-nocollapse")!!
+
+        val (challengeId, challengeNotificationId) = seedChallengeNotification(userId, "challenge_started:nocollapse-test")
+        outboxDao.enqueue(challengeNotificationId, device.id)
+        val likeNotificationId = seedNotification(userId, "like:post-nocollapse:w1")
+        outboxDao.enqueue(likeNotificationId, device.id)
+
+        val fake = FakePushDispatchService { index, _ -> FcmSendResult.Accepted("msg-nocollapse-$index") }
+        val processor = NotificationOutboxProcessor(outboxDao, deviceDao, fake, leaderboardDao, leaderboardDeltaService)
+        processor.processDueBatch()
+
+        assertEquals(2, fake.calls.size, "a CHALLENGES row must never collapse with another category due on the same device")
+        assertTrue(fake.dataByCall.none { it.containsKey("collapsed") }, "neither send should be the generic collapsed backlog summary")
+        assertEquals(challengeId.toString(), fake.dataByCall.single { it["category"] == "CHALLENGES" }["challenge_id"])
+
+        val challengeOutboxId = outboxDao.find(challengeNotificationId, device.id)!!.id
+        val likeOutboxId = outboxDao.find(likeNotificationId, device.id)!!.id
+        assertEquals(OutboxState.ACCEPTED, outboxRow(challengeOutboxId)[NotificationOutboxTable.state])
+        assertEquals(OutboxState.ACCEPTED, outboxRow(likeOutboxId)[NotificationOutboxTable.state])
     }
 }

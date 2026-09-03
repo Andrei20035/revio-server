@@ -55,6 +55,7 @@ class ChallengeFinalizationServiceTest {
         publishedAt = Instant.now(),
         cancelledAt = null,
         finalizedAt = finalizedAt,
+        notifiedStartedAt = null,
     )
 
     private fun service(

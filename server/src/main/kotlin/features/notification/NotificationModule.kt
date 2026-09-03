@@ -19,4 +19,6 @@ val notificationModule = module {
     single<IDiscoveryJob> { DiscoveryJob(get(), get(), get(), get(), get(), get()) }
     single<IInactivityDAO> { InactivityDAO() }
     single<IInactivityJob> { InactivityJob(get(), get(), get(), get(), get(), get(), get(), get(), get()) }
+    single<IChallengeStartDAO> { ChallengeStartDAO() }
+    single<IChallengeStartJob> { ChallengeStartJob(get(), get(), get(), get(), get(), get(), get(), get()) }
 }

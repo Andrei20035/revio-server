@@ -29,6 +29,9 @@ data class NotificationDTO(
     val postId: UUID? = null,
     @Serializable(with = UUIDSerializer::class)
     val commentId: UUID? = null,
+    /** Target challenge for a CHALLENGES row — null for a non-challenge row, or a tombstone. */
+    @Serializable(with = UUIDSerializer::class)
+    val challengeId: UUID? = null,
     val deepLink: String? = null,
 )
 
@@ -44,6 +47,7 @@ fun Notification.toDTO() = NotificationDTO(
     category = category,
     postId = postId,
     commentId = commentId,
+    challengeId = challengeId,
     deepLink = deepLink,
 )
 

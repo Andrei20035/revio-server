@@ -17,6 +17,7 @@ data class UserNotificationPrefs(
     val commentsEnabled: Boolean,
     val discoveryEnabled: Boolean,
     val remindersEnabled: Boolean,
+    val challengesEnabled: Boolean,
     val quietStart: LocalTime,
     val quietEnd: LocalTime,
 )
@@ -38,6 +39,7 @@ interface IUserNotificationPrefsDAO {
         commentsEnabled: Boolean? = null,
         discoveryEnabled: Boolean? = null,
         remindersEnabled: Boolean? = null,
+        challengesEnabled: Boolean? = null,
         quietStart: LocalTime? = null,
         quietEnd: LocalTime? = null,
     ): UserNotificationPrefs
@@ -60,6 +62,7 @@ class UserNotificationPrefsDAO : IUserNotificationPrefsDAO {
         commentsEnabled: Boolean?,
         discoveryEnabled: Boolean?,
         remindersEnabled: Boolean?,
+        challengesEnabled: Boolean?,
         quietStart: LocalTime?,
         quietEnd: LocalTime?,
     ): UserNotificationPrefs = transaction {
@@ -75,6 +78,7 @@ class UserNotificationPrefsDAO : IUserNotificationPrefsDAO {
                 commentsEnabled?.let { v -> it[UserNotificationPrefsTable.commentsEnabled] = v }
                 discoveryEnabled?.let { v -> it[UserNotificationPrefsTable.discoveryEnabled] = v }
                 remindersEnabled?.let { v -> it[UserNotificationPrefsTable.remindersEnabled] = v }
+                challengesEnabled?.let { v -> it[UserNotificationPrefsTable.challengesEnabled] = v }
                 quietStart?.let { v -> it[UserNotificationPrefsTable.quietStart] = v }
                 quietEnd?.let { v -> it[UserNotificationPrefsTable.quietEnd] = v }
                 it[UserNotificationPrefsTable.updatedAt] = Instant.now().atOffset(ZoneOffset.UTC)
@@ -84,6 +88,7 @@ class UserNotificationPrefsDAO : IUserNotificationPrefsDAO {
                 commentsEnabled = commentsEnabled ?: existing.commentsEnabled,
                 discoveryEnabled = discoveryEnabled ?: existing.discoveryEnabled,
                 remindersEnabled = remindersEnabled ?: existing.remindersEnabled,
+                challengesEnabled = challengesEnabled ?: existing.challengesEnabled,
                 quietStart = quietStart ?: existing.quietStart,
                 quietEnd = quietEnd ?: existing.quietEnd,
             )
@@ -94,6 +99,7 @@ class UserNotificationPrefsDAO : IUserNotificationPrefsDAO {
                 commentsEnabled = commentsEnabled ?: defaults.commentsEnabled,
                 discoveryEnabled = discoveryEnabled ?: defaults.discoveryEnabled,
                 remindersEnabled = remindersEnabled ?: defaults.remindersEnabled,
+                challengesEnabled = challengesEnabled ?: defaults.challengesEnabled,
                 quietStart = quietStart ?: defaults.quietStart,
                 quietEnd = quietEnd ?: defaults.quietEnd,
             )
@@ -103,6 +109,7 @@ class UserNotificationPrefsDAO : IUserNotificationPrefsDAO {
                 it[UserNotificationPrefsTable.commentsEnabled] = toInsert.commentsEnabled
                 it[UserNotificationPrefsTable.discoveryEnabled] = toInsert.discoveryEnabled
                 it[UserNotificationPrefsTable.remindersEnabled] = toInsert.remindersEnabled
+                it[UserNotificationPrefsTable.challengesEnabled] = toInsert.challengesEnabled
                 it[UserNotificationPrefsTable.quietStart] = toInsert.quietStart
                 it[UserNotificationPrefsTable.quietEnd] = toInsert.quietEnd
             }
@@ -116,6 +123,7 @@ class UserNotificationPrefsDAO : IUserNotificationPrefsDAO {
         commentsEnabled = UserNotificationPrefsDefaults.COMMENTS_ENABLED,
         discoveryEnabled = UserNotificationPrefsDefaults.DISCOVERY_ENABLED,
         remindersEnabled = UserNotificationPrefsDefaults.REMINDERS_ENABLED,
+        challengesEnabled = UserNotificationPrefsDefaults.CHALLENGES_ENABLED,
         quietStart = UserNotificationPrefsDefaults.QUIET_START,
         quietEnd = UserNotificationPrefsDefaults.QUIET_END,
     )
@@ -126,6 +134,7 @@ class UserNotificationPrefsDAO : IUserNotificationPrefsDAO {
         commentsEnabled = this[UserNotificationPrefsTable.commentsEnabled],
         discoveryEnabled = this[UserNotificationPrefsTable.discoveryEnabled],
         remindersEnabled = this[UserNotificationPrefsTable.remindersEnabled],
+        challengesEnabled = this[UserNotificationPrefsTable.challengesEnabled],
         quietStart = this[UserNotificationPrefsTable.quietStart],
         quietEnd = this[UserNotificationPrefsTable.quietEnd],
     )

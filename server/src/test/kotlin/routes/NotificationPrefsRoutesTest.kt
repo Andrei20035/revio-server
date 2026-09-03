@@ -101,6 +101,7 @@ class NotificationPrefsRoutesTest {
         assertEquals(true, body["commentsEnabled"]?.jsonPrimitive?.content?.toBoolean())
         assertEquals(true, body["discoveryEnabled"]?.jsonPrimitive?.content?.toBoolean())
         assertEquals(true, body["remindersEnabled"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(true, body["challengesEnabled"]?.jsonPrimitive?.content?.toBoolean())
         assertEquals("00:00", body["quietStart"]?.jsonPrimitive?.content)
         assertEquals("08:00", body["quietEnd"]?.jsonPrimitive?.content)
     }
@@ -138,12 +139,37 @@ class NotificationPrefsRoutesTest {
         assertEquals(false, secondBody["discoveryEnabled"]?.jsonPrimitive?.content?.toBoolean())
         assertEquals(true, secondBody["commentsEnabled"]?.jsonPrimitive?.content?.toBoolean())
         assertEquals(true, secondBody["remindersEnabled"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(true, secondBody["challengesEnabled"]?.jsonPrimitive?.content?.toBoolean())
 
         val stored = runBlocking { prefsDao.get(alice.userId) }
         assertEquals(false, stored.likesEnabled)
         assertEquals(false, stored.discoveryEnabled)
         assertEquals(true, stored.commentsEnabled)
         assertEquals(true, stored.remindersEnabled)
+        assertEquals(true, stored.challengesEnabled)
+    }
+
+    @Test
+    fun `PUT notification-preferences can change challengesEnabled without touching other fields`() = prefsTest { client ->
+        val alice = CommentTestSeed.seedUser(username = "alice")
+        val token = tokenFor(alice.authId, alice.userId, alice.email)
+
+        val resp = client.put("/api/users/me/notification-preferences") {
+            bearerAuth(token)
+            contentType(ContentType.Application.Json)
+            setBody("""{"challengesEnabled":false}""")
+        }
+        assertEquals(HttpStatusCode.OK, resp.status)
+
+        val body = Json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        assertEquals(false, body["challengesEnabled"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(true, body["likesEnabled"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(true, body["commentsEnabled"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(true, body["discoveryEnabled"]?.jsonPrimitive?.content?.toBoolean())
+        assertEquals(true, body["remindersEnabled"]?.jsonPrimitive?.content?.toBoolean())
+
+        val stored = runBlocking { prefsDao.get(alice.userId) }
+        assertEquals(false, stored.challengesEnabled)
     }
 
     @Test

@@ -20,6 +20,7 @@ object UserNotificationPrefsTable : Table("user_notification_prefs") {
     val commentsEnabled = bool("comments_enabled").default(true)
     val discoveryEnabled = bool("discovery_enabled").default(true)
     val remindersEnabled = bool("reminders_enabled").default(true)
+    val challengesEnabled = bool("challenges_enabled").default(true)
     val quietStart = time("quiet_start").default(LocalTime.of(0, 0))
     val quietEnd = time("quiet_end").default(LocalTime.of(8, 0))
     val updatedAt = timestampWithTimeZone("updated_at").defaultExpression(CurrentTimestampWithTimeZone)
@@ -32,6 +33,7 @@ object UserNotificationPrefsDefaults {
     const val COMMENTS_ENABLED = true
     const val DISCOVERY_ENABLED = true
     const val REMINDERS_ENABLED = true
+    const val CHALLENGES_ENABLED = true
     val QUIET_START: LocalTime = LocalTime.of(0, 0)
     val QUIET_END: LocalTime = LocalTime.of(8, 0)
 }

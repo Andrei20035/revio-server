@@ -15,8 +15,10 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import testutils.ChallengeTestSeed
 import testutils.TestDatabaseFactory
 import testutils.UserTestSeed
+import java.time.Instant
 import java.util.UUID
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -97,6 +99,95 @@ class NotificationEventServiceTest {
 
         val rows = rowsFor(recipientId, dedupeKey)
         assertEquals(0, rows.size)
+    }
+
+    // ---------- record() challengeId (push-notifications plan, "challenge is live" work) ----------
+
+    private fun seedChallenge(): UUID {
+        val familyId = ChallengeTestSeed.seedFamily()
+        return ChallengeTestSeed.seedChallenge(
+            familyId = familyId,
+            startsAt = Instant.now(),
+            endsAt = Instant.now().plusSeconds(3600),
+        )
+    }
+
+    @Test
+    fun `record with a challengeId persists it on the row`() {
+        val recipientId = seedUser()
+        val challengeId = seedChallenge()
+        val dedupeKey = "challenge_started:$challengeId"
+
+        service.record(
+            recipientId = recipientId,
+            category = NotificationCategory.CHALLENGES,
+            dedupeKey = dedupeKey,
+            actorId = null,
+            actorUsername = null,
+            challengeId = challengeId,
+            title = "New challenge is live",
+            body = "Tap to see the details and start spotting.",
+        )
+
+        val rows = rowsFor(recipientId, dedupeKey)
+        assertEquals(1, rows.size)
+        assertEquals(challengeId, rows.single()[NotificationTable.challengeId]?.value)
+    }
+
+    @Test
+    fun `record without a challengeId leaves the column null`() {
+        val recipientId = seedUser()
+        val actorId = seedUser("actor3@example.com", "actor3")
+        val dedupeKey = "like:post-789:window-1"
+
+        service.record(
+            recipientId = recipientId,
+            category = NotificationCategory.LIKES,
+            dedupeKey = dedupeKey,
+            actorId = actorId,
+            actorUsername = "actor3",
+            title = "Alex liked your spot",
+            body = "",
+        )
+
+        val rows = rowsFor(recipientId, dedupeKey)
+        assertEquals(1, rows.size)
+        assertEquals(null, rows.single()[NotificationTable.challengeId])
+    }
+
+    // ---------- recordBroadcast() (push-notifications plan, "challenge is live" work) ----------
+
+    @Test
+    fun `recordBroadcast called twice with the same dedupe key inserts only one row and never rewrites it`() {
+        val recipientId = seedUser()
+        val challengeId = seedChallenge()
+        val dedupeKey = "challenge_started:$challengeId"
+
+        val firstId = service.recordBroadcast(
+            recipientId = recipientId,
+            category = NotificationCategory.CHALLENGES,
+            dedupeKey = dedupeKey,
+            challengeId = challengeId,
+            title = "New challenge is live",
+            body = "Tap to see the details and start spotting.",
+        )
+        val secondId = service.recordBroadcast(
+            recipientId = recipientId,
+            category = NotificationCategory.CHALLENGES,
+            dedupeKey = dedupeKey,
+            challengeId = challengeId,
+            title = "New challenge is live",
+            body = "Tap to see the details and start spotting.",
+        )
+
+        assertEquals(firstId, secondId)
+
+        val rows = rowsFor(recipientId, dedupeKey)
+        assertEquals(1, rows.size)
+        val row = rows.single()
+        assertEquals(1, row[NotificationTable.actorCount])
+        assertEquals("New challenge is live", row[NotificationTable.title])
+        assertEquals("Tap to see the details and start spotting.", row[NotificationTable.body])
     }
 
     // ---------- withdrawCommentActor (plan §18, step 4.4) ----------

@@ -77,7 +77,9 @@ import com.revio.server.features.moderation.ModerationService
 import com.revio.server.features.moderation.ModerationViolationDAO
 import com.revio.server.features.moderation.OrphanedStorageObjectDAO
 import com.revio.server.features.moderation.moderationAdminRoutes
+import com.revio.server.features.notification.ChallengeStartRunResult
 import com.revio.server.features.notification.DeviceRegistryService
+import com.revio.server.features.notification.IChallengeStartJob
 import com.revio.server.features.notification.IDeviceRegistryService
 import com.revio.server.features.notification.IDiscoveryJob
 import com.revio.server.features.notification.DiscoveryRunResult
@@ -97,6 +99,7 @@ import com.revio.server.features.notification.NotificationPrefsService
 import com.revio.server.features.notification.NotificationService
 import com.revio.server.features.notification.UserDeviceDAO
 import com.revio.server.features.notification.UserNotificationPrefsDAO
+import com.revio.server.features.notification.challengeStartRoutes
 import com.revio.server.features.notification.deviceRoutes
 import com.revio.server.features.notification.discoveryRoutes
 import com.revio.server.features.notification.inactivityRoutes
@@ -1026,6 +1029,36 @@ fun Application.testDiscoveryModule(cronSecret: String? = null) {
     routing {
         route("/api") {
             discoveryRoutes(cronSecretProvider = { cronSecret })
+        }
+    }
+}
+
+/**
+ * [IChallengeStartJob] is mocked — route tests here exercise the `X-Cron-Secret` gate and response
+ * shape, not the job's own detection/fan-out logic, which is already covered end-to-end by
+ * ChallengeStartJobTest.
+ */
+fun Application.testChallengeStartModule(cronSecret: String? = null) {
+    val koinTestModule = module {
+        single<IChallengeStartJob> {
+            mockk<IChallengeStartJob>().also {
+                coEvery { it.run(any()) } returns ChallengeStartRunResult(challengesProcessed = 0, notified = 0, skipped = 0)
+            }
+        }
+        // Real DAO (not mocked) so /challenge-start-health can be exercised against actual
+        // seeded challenge rows, same reasoning as testChallengeAdminModule's IChallengeDAO.
+        single<IChallengeDAO> { ChallengeDAO() }
+    }
+
+    install(Koin) { modules(koinTestModule) }
+
+    configureSerialization()
+
+    install(RoutingRoot)
+
+    routing {
+        route("/api") {
+            challengeStartRoutes(cronSecretProvider = { cronSecret })
         }
     }
 }

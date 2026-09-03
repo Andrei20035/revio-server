@@ -31,6 +31,8 @@ data class Notification(
     val postId: UUID?,
     /** Target comment for a COMMENTS row — same tombstone behavior as [postId]. */
     val commentId: UUID?,
+    /** Target challenge for a CHALLENGES row — same tombstone behavior as [postId]. */
+    val challengeId: UUID?,
     val deepLink: String?,
 )
 
@@ -210,6 +212,7 @@ class NotificationDAO : INotificationDAO {
         category = this[NotificationTable.category],
         postId = this[NotificationTable.postId]?.value,
         commentId = this[NotificationTable.commentId]?.value,
+        challengeId = this[NotificationTable.challengeId]?.value,
         deepLink = this[NotificationTable.deepLink],
     )
 }

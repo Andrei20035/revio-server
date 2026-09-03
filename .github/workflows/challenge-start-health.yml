@@ -1,0 +1,18 @@
+name: Challenge start health
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for stuck un-notified challenges
+        run: |
+          curl -fsS -X GET "$CARSPOTTER_API_URL/api/internal/notifications/challenge-start-health" \
+               -H "X-Cron-Secret: $CRON_SECRET"
+        env:
+          CARSPOTTER_API_URL: ${{ secrets.CARSPOTTER_API_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}

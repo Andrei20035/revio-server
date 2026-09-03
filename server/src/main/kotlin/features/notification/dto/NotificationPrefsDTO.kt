@@ -11,6 +11,7 @@ data class NotificationPrefsDTO(
     val commentsEnabled: Boolean,
     val discoveryEnabled: Boolean,
     val remindersEnabled: Boolean,
+    val challengesEnabled: Boolean,
     @Serializable(with = LocalTimeSerializer::class)
     val quietStart: LocalTime,
     @Serializable(with = LocalTimeSerializer::class)
@@ -22,6 +23,7 @@ fun UserNotificationPrefs.toDTO() = NotificationPrefsDTO(
     commentsEnabled = commentsEnabled,
     discoveryEnabled = discoveryEnabled,
     remindersEnabled = remindersEnabled,
+    challengesEnabled = challengesEnabled,
     quietStart = quietStart,
     quietEnd = quietEnd,
 )
@@ -33,6 +35,7 @@ data class UpdateNotificationPrefsRequest(
     val commentsEnabled: Boolean? = null,
     val discoveryEnabled: Boolean? = null,
     val remindersEnabled: Boolean? = null,
+    val challengesEnabled: Boolean? = null,
     @Serializable(with = LocalTimeSerializer::class)
     val quietStart: LocalTime? = null,
     @Serializable(with = LocalTimeSerializer::class)

@@ -1,5 +1,6 @@
 package com.revio.server.features.notification
 
+import com.revio.server.features.challenge.ChallengeTable
 import com.revio.server.features.comment.CommentTable
 import com.revio.server.features.post.PostTable
 import com.revio.server.features.user.UserTable
@@ -11,7 +12,8 @@ import org.jetbrains.exposed.sql.javatime.timestamp
 /**
  * Which notification-preference bucket a row belongs to (see user_notification_prefs). ACCOUNT
  * covers the pre-existing moderation notifications (post removal, bans, ...); the rest are the
- * social/broadcast categories added by V36__notifications_social.sql.
+ * social/broadcast categories added by V36__notifications_social.sql, plus CHALLENGES added by
+ * V41__notification_challenges_category.sql.
  */
 enum class NotificationCategory {
     ACCOUNT,
@@ -19,6 +21,7 @@ enum class NotificationCategory {
     COMMENTS,
     DISCOVERY,
     REMINDERS,
+    CHALLENGES,
     ;
 
     companion object {
@@ -34,6 +37,7 @@ enum class NotificationTargetType {
     NONE,
     POST,
     COMMENT,
+    CHALLENGE,
 }
 
 /** Whether a push was ever attempted for this notification row — distinct from the outbox's own per-device state. */
@@ -68,6 +72,7 @@ object NotificationTable : UUIDTable("user_notifications") {
         .default(NotificationTargetType.NONE)
     val postId = reference("post_id", PostTable, onDelete = ReferenceOption.SET_NULL).nullable()
     val commentId = reference("comment_id", CommentTable, onDelete = ReferenceOption.SET_NULL).nullable()
+    val challengeId = reference("challenge_id", ChallengeTable, onDelete = ReferenceOption.SET_NULL).nullable()
     val actorCount = integer("actor_count").default(1)
     val lastActorUserId = reference("last_actor_user_id", UserTable, onDelete = ReferenceOption.SET_NULL).nullable()
     val lastActorUsername = varchar("last_actor_username", 50).nullable()

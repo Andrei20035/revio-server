@@ -366,4 +366,37 @@ class NotificationPolicyServiceTest {
         )
         assertEquals(NotificationVerdict.DEFER, decision.verdict)
     }
+
+    // ---------------------------------------------------------------------
+    // CHALLENGES category (push-notifications plan, "challenge is live" work) — not a
+    // SCHEDULED_CATEGORIES member (unlike discovery/reminders) and not a SOCIAL_CATEGORIES
+    // member (unlike likes/comments), so it falls straight through to caps/cooldown regardless
+    // of timezone, and is bound only by the absolute daily cap.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `null timezone still dispatches CHALLENGES, unlike the scheduled categories`() {
+        val decision = service.evaluate(baseInput(category = NotificationCategory.CHALLENGES, zone = null))
+        assertEquals(NotificationVerdict.DISPATCH, decision.verdict)
+    }
+
+    @Test
+    fun `CHALLENGES is deferred, not dispatched or suppressed, during quiet hours`() {
+        val decision = service.evaluate(
+            baseInput(
+                category = NotificationCategory.CHALLENGES,
+                now = instantAt(LocalDate.of(2026, 6, 15), LocalTime.of(1, 0), bucharest),
+            ),
+        )
+        assertEquals(NotificationVerdict.DEFER, decision.verdict)
+        assertNotNull(decision.notBefore)
+    }
+
+    @Test
+    fun `absolute daily cap of 10 suppresses CHALLENGES too once reached`() {
+        val underCap = service.evaluate(baseInput(category = NotificationCategory.CHALLENGES, dailyTotalCount = 9))
+        val atCap = service.evaluate(baseInput(category = NotificationCategory.CHALLENGES, dailyTotalCount = 10))
+        assertEquals(NotificationVerdict.DISPATCH, underCap.verdict)
+        assertEquals(NotificationVerdict.SUPPRESS, atCap.verdict)
+    }
 }

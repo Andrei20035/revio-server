@@ -28,4 +28,11 @@ object ChallengeTable : UUIDTable("challenges") {
     val publishedAt = timestampWithTimeZone("published_at").nullable()
     val cancelledAt = timestampWithTimeZone("cancelled_at").nullable()
     val finalizedAt = timestampWithTimeZone("finalized_at").nullable()
+
+    /**
+     * Set once [com.revio.server.features.notification.ChallengeStartJob]'s "challenge is live"
+     * push fan-out has fully completed for this challenge — mirrors [finalizedAt]'s own
+     * crash-recovery shape. See V43__challenge_started_notification.sql.
+     */
+    val notifiedStartedAt = timestampWithTimeZone("notified_started_at").nullable()
 }
