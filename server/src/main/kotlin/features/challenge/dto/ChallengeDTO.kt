@@ -18,6 +18,10 @@ data class ChallengeDTO(
     val rewardPoints: Int,
     @Serializable(with = InstantSerializer::class) val startsAt: Instant,
     @Serializable(with = InstantSerializer::class) val endsAt: Instant,
+    /** Nullable so an older client (built before this field existed) still deserializes this
+     * response. `GET /challenges/{id}` has no other way to carry the challenge's own lifecycle
+     * status — unlike `/current` and `/me`, which already send it as a sibling field. */
+    val effectiveStatus: String? = null,
 )
 
 /** The viewer's own progress on one challenge. */

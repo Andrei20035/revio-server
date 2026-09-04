@@ -13,6 +13,7 @@ import com.revio.server.features.challenge.ChallengeTable
 import com.revio.server.features.challenge.FinalizationResult
 import com.revio.server.features.challenge.IChallengeFinalizationService
 import com.revio.server.features.challenge.RewardState
+import com.revio.server.features.challenge.dto.ChallengeDTO
 import com.revio.server.features.challenge.dto.ChallengeProgressDetailDTO
 import com.revio.server.features.challenge.dto.CurrentChallengeDTO
 import io.ktor.client.HttpClient
@@ -431,6 +432,58 @@ class ChallengeRoutesTest {
         assertEquals(HttpStatusCode.Unauthorized, response.status)
     }
 
+    // ---------- effectiveStatus on GET /challenges/{id} (plan §6 pas 4b) ----------
+    // Unlike /current and /me, this route has no wrapper DTO to carry effectiveStatus as a
+    // sibling field, so it's embedded directly in ChallengeDTO instead — see that DTO's KDoc.
+
+    @Test
+    fun `GET challenges id returns effectiveStatus CANCELLED for a cancelled challenge`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600),
+            status = ChallengeStatus.CANCELLED,
+        )
+
+        val response = client.get("/api/challenges/$challengeId") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.body<ChallengeDTO>()
+        assertEquals("CANCELLED", body.effectiveStatus)
+    }
+
+    @Test
+    fun `GET challenges id returns effectiveStatus ACTIVE for a challenge inside its window`() = userTest { client, token, _ ->
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600),
+        )
+
+        val response = client.get("/api/challenges/$challengeId") { header(HttpHeaders.Authorization, "Bearer $token") }
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = response.body<ChallengeDTO>()
+        assertEquals("ACTIVE", body.effectiveStatus)
+    }
+
+    @Test
+    fun `GET challenges id response deserializes with a client that doesn't know effectiveStatus`() = userTest { client, token, _ ->
+        // Backward compatibility: effectiveStatus is new and additive — a client built before it
+        // existed (LegacyChallengeDTO, below) must still decode this response.
+        val familyId = ChallengeTestSeed.seedFamily()
+        val now = Instant.now()
+        val challengeId = ChallengeTestSeed.seedChallenge(
+            familyId = familyId, startsAt = now.minusSeconds(3600), endsAt = now.plusSeconds(3600), title = "Weekend Golf Hunt",
+        )
+
+        val response = client.get("/api/challenges/$challengeId") { header(HttpHeaders.Authorization, "Bearer $token") }
+        val raw = response.bodyAsText()
+
+        val legacy = json.decodeFromString(LegacyChallengeDTO.serializer(), raw)
+        assertEquals("Weekend Golf Hunt", legacy.title)
+    }
+
     // ---------- participantState wiring (plan §7.2, D2) ----------
 
     private fun finalizationService() = com.revio.server.features.challenge.ChallengeFinalizationService(
@@ -576,4 +629,19 @@ private data class LegacyChallengeProgressDTO(
 private data class LegacyChallengeProgressDetailDTO(
     val progress: LegacyChallengeProgressDTO,
     val contributions: List<LegacyChallengeContributionDTO>,
+)
+
+// ---------- Pre-pas-4b wire shape (no effectiveStatus), for the backward-compatibility test above ----------
+
+@Serializable
+private data class LegacyChallengeDTO(
+    val id: String,
+    val title: String,
+    val description: String?,
+    val targetFamilyBrand: String,
+    val targetFamilyName: String,
+    val requiredPosts: Int,
+    val rewardPoints: Int,
+    val startsAt: String,
+    val endsAt: String,
 )

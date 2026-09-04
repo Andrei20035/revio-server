@@ -31,7 +31,7 @@ private val logger = LoggerFactory.getLogger("com.revio.server.features.challeng
  * call per challenge (see the plan's Pas 3/§9-N+1: `GET /challenges/me` would otherwise turn one
  * page of N challenges into N extra queries).
  */
-private fun Challenge.toDTO(family: CarFamily?): ChallengeDTO = ChallengeDTO(
+private fun Challenge.toDTO(family: CarFamily?, now: Instant): ChallengeDTO = ChallengeDTO(
     id = id,
     title = title,
     description = description,
@@ -41,6 +41,7 @@ private fun Challenge.toDTO(family: CarFamily?): ChallengeDTO = ChallengeDTO(
     rewardPoints = rewardPoints,
     startsAt = startsAt,
     endsAt = endsAt,
+    effectiveStatus = effectiveStatus(this, now).name,
 )
 
 private fun ParticipantProgress.toDTO(challenge: Challenge, now: Instant) = ChallengeProgressDTO(
@@ -113,7 +114,7 @@ fun Route.challengeRoutes() {
                 call.respond(
                     HttpStatusCode.OK,
                     CurrentChallengeDTO(
-                        challenge = challenge.toDTO(family),
+                        challenge = challenge.toDTO(family, now),
                         progress = progress.toDTO(challenge, now),
                         effectiveStatus = effectiveStatus(challenge, now).name,
                     ),
@@ -159,7 +160,7 @@ fun Route.challengeRoutes() {
                             summary = summary,
                             challenges = page.items.map { item ->
                                 ChallengeHistoryItemDTO(
-                                    challenge = item.challenge.toDTO(families[item.challenge.targetFamilyId]),
+                                    challenge = item.challenge.toDTO(families[item.challenge.targetFamilyId], now),
                                     effectiveStatus = item.effectiveStatus.name,
                                     progress = item.progress.toDTO(item.challenge, now),
                                 )
@@ -184,7 +185,7 @@ fun Route.challengeRoutes() {
                     ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "Challenge not found"))
 
                 val family = carFamilyService.getFamilies(setOf(challenge.targetFamilyId))[challenge.targetFamilyId]
-                call.respond(HttpStatusCode.OK, challenge.toDTO(family))
+                call.respond(HttpStatusCode.OK, challenge.toDTO(family, Instant.now()))
             }
 
             get("/{id}/progress") {
